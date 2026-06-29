@@ -1,0 +1,10 @@
+# Data Engineering & AI
+pyspark
+Faker
+pandas
+
+# Backend Server
+fastapi
+uvicorn
+python-dotenv
+psycopg2-binary
