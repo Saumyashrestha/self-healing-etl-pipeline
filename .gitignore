@@ -16,3 +16,5 @@ dist/
 *.csv
 *.parquet
 *.avro
+
+warehouse/

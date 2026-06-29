@@ -1,5 +1,5 @@
 # Data Engineering & AI
-pyspark
+pyspark==3.5.1
 Faker
 pandas
 
