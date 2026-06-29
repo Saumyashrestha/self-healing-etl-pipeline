@@ -1,0 +1,18 @@
+# Environments
+.env
+venv/
+.venv
+env/
+
+# Python caching
+__pycache__/
+*.pyc
+
+# Node / Frontend dependencies
+node_modules/
+dist/
+
+# Local data files (safeguard)
+*.csv
+*.parquet
+*.avro
