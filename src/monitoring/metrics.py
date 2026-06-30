@@ -71,6 +71,22 @@ PHASE: {phase_label.upper()}
         f.write(report_content)
         
     print(f"Successfully appended metrics to: {report_path}\n")
+
+# Verification: Check Snapshot Count
+    print("\n--- AUDIT: VERIFYING SNAPSHOT EXPIRATION ---")
+    
+    tables = ["db.orders", "db.order_items"]
+    for table in tables:
+        count = spark.sql(f"SELECT count(*) as total FROM local.{table}.snapshots").collect()[0]['total']
+        print(f"Table: {table} | Remaining Snapshots: {count}")
+        if count == 1:
+            print(f"  Success: Snapshots for {table} expired correctly.")
+        else:
+            print(f"  Warning: Expected 1, found {count}.")
+    
+    print("\n--- AUDIT: IDENTIFYING ORPHANED FILES ---")
+    spark.sql("CALL local.system.remove_orphan_files(table => 'db.orders', dry_run => true)").show(vertical=True)
+
     spark.stop()
 
 if __name__ == "__main__":

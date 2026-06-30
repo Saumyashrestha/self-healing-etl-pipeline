@@ -31,10 +31,22 @@ def run_maintenance():
 
     # 2. Cleanup (Expire old snapshots and delete physical garbage files)
     print("\n3. Expiring old snapshots for 'orders' (Retaining only the latest 1)...")
-    spark.sql("CALL local.system.expire_snapshots(table => 'db.orders', retain_last => 1)").show(vertical=True)
+    spark.sql("""
+        CALL local.system.expire_snapshots(
+            table => 'db.orders', 
+            older_than => TIMESTAMP '2030-01-01 00:00:00', 
+            retain_last => 1
+        )
+    """).show(vertical=True)
 
     print("4. Expiring old snapshots for 'order_items' (Retaining only the latest 1)...")
-    spark.sql("CALL local.system.expire_snapshots(table => 'db.order_items', retain_last => 1)").show(vertical=True)
+    spark.sql("""
+        CALL local.system.expire_snapshots(
+            table => 'db.order_items', 
+            older_than => TIMESTAMP '2030-01-01 00:00:00', 
+            retain_last => 1
+        )
+    """).show(vertical=True)
 
     print("\nMaintenance procedures complete! The tables are healed.")
     spark.stop()
