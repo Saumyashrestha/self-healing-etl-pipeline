@@ -88,7 +88,57 @@ PHASE: {phase_label.upper()}
     spark.sql("CALL local.system.remove_orphan_files(table => 'db.orders', dry_run => true)").show(vertical=True)
 
     spark.stop()
+    
+def get_table_metrics(table_name: str) -> str:
+    """
+    Agent-facing function to retrieve current table metrics dynamically.
+    Returns a formatted string directly to the caller.
+    """
+    current_script_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(os.path.dirname(current_script_dir))
+    warehouse_path = os.path.join(root_dir, "warehouse")
 
+    # Get or create a Spark session 
+    # (We don't stop it at the end so the API can reuse it on multiple calls)
+    spark = SparkSession.builder \
+        .appName("Iceberg-Agent-Tool") \
+        .config("spark.jars.packages", "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0") \
+        .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+        .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog") \
+        .config("spark.sql.catalog.local.type", "hadoop") \
+        .config("spark.sql.catalog.local.warehouse", warehouse_path) \
+        .getOrCreate()
+
+    spark.sparkContext.setLogLevel("ERROR")
+
+    try:
+        # Fetch Snapshot Count for the specific table
+        snapshot_df = spark.sql(f"SELECT count(*) as total_snapshots FROM local.db.{table_name}.snapshots")
+        total_snapshots = snapshot_df.collect()[0]['total_snapshots']
+
+        # Fetch File Counts and Sizes for the specific table
+        files_df = spark.sql(f"""
+            SELECT 
+                content,
+                count(*) as file_count,
+                round(avg(file_size_in_bytes) / 1024, 2) as avg_size_kb 
+            FROM local.db.{table_name}.files 
+            GROUP BY content
+        """).collect()
+
+        data_files = 0
+        data_file_avg_kb = 0.0
+
+        for row in files_df:
+            if row['content'] == 0:  # Data Files
+                data_files = row['file_count']
+                data_file_avg_kb = row['avg_size_kb']
+
+        return f"Metrics for {table_name} - Snapshots: {total_snapshots} | Active Data Files: {data_files} (Avg Size: {data_file_avg_kb} KB)"
+        
+    except Exception as e:
+        return f"Error retrieving metrics for {table_name}. Ensure the table exists. Error: {str(e)}"
+    
 if __name__ == "__main__":
     # Allow passing the phase as an argument (e.g., python metrics.py before)
     # Default to "current_state" if no argument is passed
