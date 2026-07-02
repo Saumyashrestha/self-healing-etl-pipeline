@@ -29,6 +29,10 @@ def capture_metrics(phase_label):
     snapshot_df = spark.sql("SELECT count(*) as total_snapshots FROM local.db.orders.snapshots")
     total_snapshots = snapshot_df.collect()[0]['total_snapshots']
 
+    # Fetch Manifest Count
+    manifest_df = spark.sql("SELECT count(*) as total_manifests FROM local.db.orders.manifests")
+    total_manifests = manifest_df.collect()[0]['total_manifests']
+
     # 2. Fetch File Counts and Sizes
     files_df = spark.sql("""
         SELECT 
@@ -59,8 +63,9 @@ def capture_metrics(phase_label):
 PHASE: {phase_label.upper()}
 ============================================================
 1. Table Snapshots:          {total_snapshots}
-2. Active Data Files:         {data_files} (Avg Size: {data_file_avg_kb} KB)
-3. Active Position Deletes:   {delete_files} (Avg Size: {delete_file_avg_kb} KB)
+2. Manifest Files:           {total_manifests}  <-- Added this line
+3. Active Data Files:        {data_files} (Avg Size: {data_file_avg_kb} KB)
+4. Active Position Deletes:  {delete_files} (Avg Size: {delete_file_avg_kb} KB)
 """
 
     # Print to console for immediate visibility
@@ -99,7 +104,6 @@ def get_table_metrics(table_name: str) -> str:
     warehouse_path = os.path.join(root_dir, "warehouse")
 
     # Get or create a Spark session 
-    # (We don't stop it at the end so the API can reuse it on multiple calls)
     spark = SparkSession.builder \
         .appName("Iceberg-Agent-Tool") \
         .config("spark.jars.packages", "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0") \
@@ -112,11 +116,15 @@ def get_table_metrics(table_name: str) -> str:
     spark.sparkContext.setLogLevel("ERROR")
 
     try:
-        # Fetch Snapshot Count for the specific table
+        # 1. Fetch Snapshot Count
         snapshot_df = spark.sql(f"SELECT count(*) as total_snapshots FROM local.db.{table_name}.snapshots")
         total_snapshots = snapshot_df.collect()[0]['total_snapshots']
 
-        # Fetch File Counts and Sizes for the specific table
+        # 2. Fetch Manifest Count 
+        manifest_df = spark.sql(f"SELECT count(*) as total_manifests FROM local.db.{table_name}.manifests")
+        total_manifests = manifest_df.collect()[0]['total_manifests']
+
+        # 3. Fetch File Counts and Sizes
         files_df = spark.sql(f"""
             SELECT 
                 content,
@@ -126,6 +134,7 @@ def get_table_metrics(table_name: str) -> str:
             GROUP BY content
         """).collect()
 
+        # 4. Parse the file metrics (THE MISSING PIECE)
         data_files = 0
         data_file_avg_kb = 0.0
 
@@ -134,7 +143,7 @@ def get_table_metrics(table_name: str) -> str:
                 data_files = row['file_count']
                 data_file_avg_kb = row['avg_size_kb']
 
-        return f"Metrics for {table_name} - Snapshots: {total_snapshots} | Active Data Files: {data_files} (Avg Size: {data_file_avg_kb} KB)"
+        return f"Metrics for {table_name} - Snapshots: {total_snapshots} | Manifests: {total_manifests} | Active Data Files: {data_files} (Avg Size: {data_file_avg_kb} KB)"
         
     except Exception as e:
         return f"Error retrieving metrics for {table_name}. Ensure the table exists. Error: {str(e)}"
