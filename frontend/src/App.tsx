@@ -29,10 +29,19 @@ function App() {
         </div>
       </aside>
 
-      <main className="flex-1 p-8 lg:p-10 overflow-y-auto">
-        {activeTab === 'dashboard' && <Dashboard />}
-        {activeTab === 'iceberg-metrics' && <IcebergMetrics />}
-        {activeTab === 'ai-copilot' && <AICopilot />}
+      <main className="flex-1 p-8 lg:p-10 overflow-y-auto relative">
+        <div className={activeTab === 'dashboard' ? 'block' : 'hidden'}>
+          <Dashboard />
+        </div>
+        
+        <div className={activeTab === 'iceberg-metrics' ? 'block' : 'hidden'}>
+          <IcebergMetrics />
+        </div>
+        
+        <div className={activeTab === 'ai-copilot' ? 'block' : 'hidden'}>
+          <AICopilot />
+        </div>
+
       </main>
     </div>
   );
