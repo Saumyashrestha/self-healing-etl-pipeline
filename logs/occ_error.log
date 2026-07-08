@@ -1,5 +1,5 @@
-An error occurred while calling o40.sql.
-: org.apache.iceberg.exceptions.ValidationException: Found conflicting files that can contain records matching (ref(name="id") == 1 and ref(name="category") == "ELECTRONICS"): [C:/Users/saumya.shrestha/Desktop/project2-self-healing-etl/warehouse/db/occ_test/data/category=ELECTRONICS/00000-3-593d6d2a-5b74-4a64-9461-bb271e7fd1ed-0-00001.parquet]
+An error occurred while calling o39.sql.
+: org.apache.iceberg.exceptions.ValidationException: Found conflicting files that can contain records matching (ref(name="id") == 1 and ref(name="category") == "ELECTRONICS"): [warehouse/db/occ_test/data/category=ELECTRONICS/00000-3-c1e4d3c7-c9af-4f65-bac1-18cbc185d8a4-0-00001.parquet]
 	at org.apache.iceberg.MergingSnapshotProducer.validateAddedDataFiles(MergingSnapshotProducer.java:340)
 	at org.apache.iceberg.BaseOverwriteFiles.validate(BaseOverwriteFiles.java:142)
 	at org.apache.iceberg.SnapshotProducer.apply(SnapshotProducer.java:233)
