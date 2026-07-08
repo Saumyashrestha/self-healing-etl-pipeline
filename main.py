@@ -1,12 +1,20 @@
 import os
+import sys
 import json
 import re
+import asyncio
+import subprocess
+from queue import Queue
+from threading import Thread
+
+
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 
 from groq import Groq
 from src.monitoring.metrics import get_table_metrics
@@ -190,6 +198,45 @@ async def chat_endpoint(request: ChatRequest):
 
     except Exception as e:
         return {"reply": f"Agent error: {str(e)}"}
+    
+@app.get("/api/simulate-occ")
+async def stream_occ_simulation():
+    log_queue = Queue()
+
+    def run_script():
+        # Notice sys.executable is used to force the venv python
+        process = subprocess.Popen(
+            [sys.executable, "tests/test_iceberg_concurrency.py"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,      
+            bufsize=1
+        )
+        
+        # THE NOISE FILTER
+        for line in process.stdout:
+            stripped = line.strip()
+            
+            # Pass ONLY lines explicitly labeled by our Python script
+            # This instantly destroys all Spark, Ivy, and Java background noise
+            if stripped.startswith("[LOG]") or stripped.startswith("[DATA]"):
+                log_queue.put(stripped)
+
+    thread = Thread(target=run_script)
+    thread.start()
+
+    async def event_generator():
+        while True:
+            while not log_queue.empty():
+                line = log_queue.get()
+                if line == "[SIMULATION_COMPLETE]":
+                    yield f"data: {line}\n\n"
+                    return
+                elif line:
+                    yield f"data: {line}\n\n"
+            await asyncio.sleep(0.1)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 if __name__ == "__main__":
     import uvicorn
