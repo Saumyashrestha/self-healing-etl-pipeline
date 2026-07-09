@@ -1,6 +1,11 @@
 import os
 import json
 import re
+import asyncio
+import subprocess
+import sys
+from fastapi.responses import StreamingResponse
+
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,6 +71,18 @@ agent_tools = [
                 "required": ["table_names"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_occ_crash_log",
+            "description": "Reads the OCC error log to explain why a concurrency conflict occurred.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 
@@ -81,6 +98,41 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
+
+@app.get("/api/simulate-occ")
+def stream_occ_simulation():
+    def event_generator():
+        script_path = BASE_DIR / "tests" / "test_iceberg_concurrency.py"
+        
+        # We use a synchronous Popen with bufsize=1 (line buffered)
+        # This is the most reliable way to stream on Windows
+        process = subprocess.Popen(
+            [sys.executable, "-u", str(script_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        try:
+            for line in iter(process.stdout.readline, ''):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                
+                # Logic: Only stream things marked [LOG] or [DATA]
+                if stripped.startswith("[LOG]") or stripped.startswith("[DATA]"):
+                    yield f"data: {stripped}\n\n"
+            
+            process.stdout.close()
+            process.wait()
+            yield "data: [SIMULATION_COMPLETE]\n\n"
+            
+        except Exception as e:
+            yield f"data: [LOG] CRITICAL ERROR: {str(e)}\n\n"
+            yield "data: [SIMULATION_COMPLETE]\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
@@ -170,6 +222,34 @@ async def chat_endpoint(request: ChatRequest):
                     res = await run_in_threadpool(execute_table_maintenance, t)
                     results.append(res)
                 tool_result = " \n ".join(results)
+
+            elif function_name == "analyze_occ_crash_log":
+                error_log_path = BASE_DIR / "logs" / "occ_error.log"
+                history_log_path = BASE_DIR / "logs" / "simulation_history.log" 
+                
+                error_content = "Error log not found."
+                if error_log_path.exists():
+                    with open(error_log_path, "r") as f:
+                        error_content = f.read()
+                        
+                history_content = "History log not found."
+                if history_log_path.exists():
+                    with open(history_log_path, "r") as f:
+                        history_content = f.read()
+                
+                tool_result = (
+                    f"--- EXECUTION HISTORY ---\n{history_content}\n\n"
+                    f"--- TECHNICAL ERROR LOG ---\n{error_content}\n\n"
+                    "SYSTEM INSTRUCTION: You are a strict system diagnostic tool. "
+                    "DO NOT write paragraphs. Output EXACTLY this format:\n\n"
+                    "**TIMELINE:**\n"
+                    "- Worker A Baseline Read: [Extract ONLY the timestamp for 'Worker A Reading partition']\n"
+                    "- Worker B Commit Success: [Extract ONLY the timestamp for 'Worker B COMMIT SUCCESS']\n"
+                    "- Worker A Commit Rejected: [Extract ONLY the CRASH TIMESTAMP]\n\n"
+                    "**CAUSE:**\n"
+                    "Worker B advanced the table version. Worker A's baseline became stale. "
+                    "Iceberg blocked Worker A's commit to prevent data corruption."
+                )
 
             messages.append({
                 "tool_call_id": tool_call_id,
