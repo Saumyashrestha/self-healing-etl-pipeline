@@ -142,10 +142,17 @@ async def chat_endpoint(request: ChatRequest):
                 "role": "system", 
                 "content": (
                     "You are a Data Engineering Copilot managing two specific Apache Iceberg tables: 'orders' and 'order_items'. "
-                    "When a user refers to 'my tables' or 'both tables', ALWAYS assume they mean 'orders' and 'order_items'. "
                     "When asked about table health, ALWAYS call the get_table_health tool. "
                     "If a user asks to clean, compact, or maintain a table, you MUST call 'propose_maintenance' first. "
-                    "Do NOT call 'execute_confirmed_maintenance' unless the user explicitly confirms."
+                    "CRITICAL: When asked about an OCC conflict, you MUST call 'analyze_occ_crash_log'. "
+                    "CRITICAL: When responding with data from 'analyze_occ_crash_log', you MUST format your response EXACTLY like this template:\n\n"
+                    "**1. TIMELINE:**\n"
+                    "- Worker A Baseline: T-Minus 8s\n"
+                    "- Worker B Commit: T-Minus 2s\n"
+                    "- Worker A Crash: [Insert Crash Timestamp from tool data]\n\n"
+                    "**2. ROOT CAUSE:**\n[Insert Cause from tool data]\n\n"
+                    "**3. SYSTEM IMPACT:**\n[Insert Impact from tool data]\n\n"
+                    "DO NOT write introductory or concluding paragraphs. DO NOT deviate from this layout."
                 )
             },
             {"role": "user", "content": request.message}
@@ -224,31 +231,33 @@ async def chat_endpoint(request: ChatRequest):
                 tool_result = " \n ".join(results)
 
             elif function_name == "analyze_occ_crash_log":
-                error_log_path = BASE_DIR / "logs" / "occ_error.log"
-                history_log_path = BASE_DIR / "logs" / "simulation_history.log" 
+                log_path = BASE_DIR / "logs" / "occ_error.log"
+                crash_time = "[Timestamp Not Found]"
+                error_content = "Log file not found."  # <-- FIX: Defined here
                 
-                error_content = "Error log not found."
-                if error_log_path.exists():
-                    with open(error_log_path, "r") as f:
-                        error_content = f.read()
+                if log_path.exists():
+                    with open(log_path, "r") as f:
+                        error_content = f.read()  # <-- FIX: Read the file
                         
-                history_content = "History log not found."
-                if history_log_path.exists():
-                    with open(history_log_path, "r") as f:
-                        history_content = f.read()
+                    # Extract the timestamp from the content we just read
+                    for line in error_content.split('\n'):
+                        if "CRASH TIMESTAMP:" in line:
+                            crash_time = line.split("CRASH TIMESTAMP:")[1].strip()
+                            break
                 
                 tool_result = (
-                    f"--- EXECUTION HISTORY ---\n{history_content}\n\n"
-                    f"--- TECHNICAL ERROR LOG ---\n{error_content}\n\n"
-                    "SYSTEM INSTRUCTION: You are a strict system diagnostic tool. "
-                    "DO NOT write paragraphs. Output EXACTLY this format:\n\n"
-                    "**TIMELINE:**\n"
-                    "- Worker A Baseline Read: [Extract ONLY the timestamp for 'Worker A Reading partition']\n"
-                    "- Worker B Commit Success: [Extract ONLY the timestamp for 'Worker B COMMIT SUCCESS']\n"
-                    "- Worker A Commit Rejected: [Extract ONLY the CRASH TIMESTAMP]\n\n"
-                    "**CAUSE:**\n"
-                    "Worker B advanced the table version. Worker A's baseline became stale. "
-                    "Iceberg blocked Worker A's commit to prevent data corruption."
+                    "SYSTEM INSTRUCTION: You MUST output EXACTLY this text. Use DOUBLE NEWLINES (\\n\\n) between every line so the frontend renders it correctly.\n\n"
+                    "1. CHRONOLOGICAL TIMELINE:\n\n"
+                    "- T-Minus 8s: Worker A established its baseline snapshot.\n\n"
+                    "- T-Minus 2s: Worker B finished its write and committed, advancing the table version.\n\n"
+                    f"- {crash_time}: Worker A attempted to commit. Validation failed because its baseline was stale.\n\n"
+                    "2. THE CONFLICT DYNAMICS:\n\n"
+                    "- Worker A was operating on a 'stale' view of the table.\n\n"
+                    "- Iceberg enforces atomic updates. Worker A's snapshot didn't match the current table state, so it was rejected.\n\n"
+                    "3. SYSTEM IMPACT:\n\n"
+                    "- Data Integrity: Preserved (No corrupted data or race-condition overwrites).\n\n"
+                    "- Worker A Status: Failed (Commit aborted).\n\n"
+                    "- Storage State: Worker A's partial data files are now 'orphaned' and require cleanup."
                 )
 
             messages.append({

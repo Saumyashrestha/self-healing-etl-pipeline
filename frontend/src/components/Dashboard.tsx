@@ -96,7 +96,9 @@ export default function Dashboard() {
   const combinedChartData = ordersData.map((od, i) => ({
     batch: od.batch,
     orders_files: od.files,
-    items_files: itemsData[i] ? itemsData[i].files : 0
+    orders_snapshots: od.snapshots, // Added real snapshot data
+    items_files: itemsData[i] ? itemsData[i].files : 0,
+    items_snapshots: itemsData[i] ? itemsData[i].snapshots : 0 // Added real snapshot data
   }));
 
   const renderTableMetrics = (title: string, audit: typeof defaultAudit) => {
@@ -234,7 +236,7 @@ export default function Dashboard() {
                 tickLine={false} 
                 tick={{fill: '#94A3B8', fontSize: 12}} 
                 dx={-10} 
-                label={{ value: "Total Physical Files", angle: -90, position: "insideLeft", offset: -5, fill: "#64748b", fontSize: 12, fontWeight: 500 }}
+                label={{ value: "Count", angle: -90, position: "insideLeft", offset: -5, fill: "#64748b", fontSize: 12, fontWeight: 500 }}
               />
               
               <Tooltip contentStyle={{ borderRadius: '8px', border: '1px solid #E2E8F0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.05)' }} />
@@ -242,8 +244,14 @@ export default function Dashboard() {
               
               <ReferenceLine x={50} stroke="#EF4444" strokeDasharray="3 3" />
               
-              <Line type="monotone" name="Orders (Files)" dataKey="orders_files" stroke="#2563EB" strokeWidth={3} dot={false} activeDot={{r: 6}} />
-              <Line type="monotone" name="Order Items (Files)" dataKey="items_files" stroke="#8B5CF6" strokeWidth={3} dot={false} activeDot={{r: 6}} />
+              {/* Solid Lines for Physical Files */}
+              {/* Orders - Thick Teal (Bottom Layer) */}
+              <Line type="monotone" name="Orders (Files)" dataKey="orders_files" stroke="#0F766E" strokeWidth={6} dot={false} activeDot={{r: 6}} />
+              <Line type="monotone" name="Orders (Snapshots)" dataKey="orders_snapshots" stroke="#0F766E" strokeWidth={4} strokeDasharray="4 4" opacity={0.5} dot={false} />
+
+              {/* Order Items - Thin Coral (Top Layer - allows Teal to peek through if data matches exactly) */}
+              <Line type="monotone" name="Order Items (Files)" dataKey="items_files" stroke="#EA580C" strokeWidth={2} dot={false} activeDot={{r: 6}} />
+              <Line type="monotone" name="Order Items (Snapshots)" dataKey="items_snapshots" stroke="#EA580C" strokeWidth={2} strokeDasharray="4 4" dot={false} />
             </LineChart>
           </ResponsiveContainer>
         </div>
