@@ -2,7 +2,6 @@ import { useState } from 'react';
 import Dashboard from './components/Dashboard';
 import IcebergMetrics from './components/IcebergMetrics';
 import AICopilot from './components/AICopilot';
-// 1. Add this import:
 import OCCVisualizer from './components/OCCVisualizer';
 
 function App() {
@@ -16,7 +15,6 @@ function App() {
             <h1 className="font-bold text-lg tracking-tight">Lakehouse Copilot</h1>
           </div>
           <nav className="space-y-1.5">
-            {/* 2. Add 'OCC Simulation' to this array: */}
             {['Dashboard', 'Iceberg Metrics', 'AI Copilot', 'OCC Simulation'].map((item) => (
               <button 
                 key={item}
@@ -34,7 +32,8 @@ function App() {
 
       <main className="flex-1 p-8 lg:p-10 overflow-y-auto relative">
         <div className={activeTab === 'dashboard' ? 'block' : 'hidden'}>
-          <Dashboard />
+          {/* We pass the state updater here so the Dashboard can change tabs! */}
+          <Dashboard setActiveTab={setActiveTab} />
         </div>
         
         <div className={activeTab === 'iceberg-metrics' ? 'block' : 'hidden'}>
@@ -45,7 +44,6 @@ function App() {
           <AICopilot />
         </div>
 
-        {/* 3. Add this rendering block: */}
         <div className={activeTab === 'occ-simulation' ? 'block' : 'hidden'}>
           <OCCVisualizer />
         </div>

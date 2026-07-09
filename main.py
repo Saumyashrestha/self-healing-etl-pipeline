@@ -5,6 +5,7 @@ import asyncio
 import subprocess
 import sys
 from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Request
 
 from pathlib import Path
 from fastapi import FastAPI
@@ -16,6 +17,8 @@ from fastapi.concurrency import run_in_threadpool
 from groq import Groq
 from src.monitoring.metrics import get_table_metrics
 from src.maintenance.maintenance import execute_table_maintenance
+from contextlib import asynccontextmanager
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- DIRECTORY AND ENV SETUP ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -86,8 +89,69 @@ agent_tools = [
     }
 ]
 
+# --- PROACTIVE AGENT STATE ---
+agent_message_queue = asyncio.Queue()
+
+agent_message_clients = []
+
+async def run_health_audit():
+    """Silently fetches metrics and asks the LLM if a warning is needed."""
+    try:
+        orders_metrics = await run_in_threadpool(get_table_metrics, "orders")
+        items_metrics = await run_in_threadpool(get_table_metrics, "order_items")
+        
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a proactive monitoring agent for an Apache Iceberg database. "
+                    "Review the provided metrics for BOTH the 'orders' and 'order_items' tables. "
+                    "If EITHER table is highly fragmented (e.g., too many small data files, large delete bloat), "
+                    "output a SHORT, urgent 1-2 sentence warning suggesting compaction. "
+                    "If BOTH tables are reasonably healthy, output EXACTLY the word: HEALTHY."
+                )
+            },
+            {
+                "role": "user", 
+                "content": f"Orders Table Metrics: {orders_metrics}\nOrder Items Table Metrics: {items_metrics}"
+            }
+        ]
+        
+        response = await run_in_threadpool(
+            client.chat.completions.create,
+            model="llama-3.3-70b-versatile",
+            messages=messages
+        )
+        
+        evaluation = response.choices[0].message.content.strip()
+        print(f"[Agent Monitor] LLM thought: {evaluation}")
+        
+        if "HEALTHY" not in evaluation.upper():
+            # 3. Target BOTH tables in the UI button payload
+            alert_payload = json.dumps({
+                "content": evaluation,
+                "requires_confirmation": True,
+                "target_table": "orders, order_items"  # <-- Fix is here
+            })
+            
+            for client_queue in agent_message_clients:
+                await client_queue.put(alert_payload)
+                
+    except Exception as e:
+        print(f"[Agent Monitor] Error: {e}")
+
+# --- APP LIFECYCLE ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(run_health_audit, 'interval', minutes=1) 
+    scheduler.start()
+    print("[Agent Monitor] Proactive background scheduler started (2-min interval).")
+    yield
+    scheduler.shutdown()
+
 # --- 2. FASTAPI SETUP ---
-app = FastAPI(title="Iceberg Agentic Copilot Backend")
+app = FastAPI(title="Iceberg Agentic Copilot Backend", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -105,7 +169,6 @@ def stream_occ_simulation():
         script_path = BASE_DIR / "tests" / "test_iceberg_concurrency.py"
         
         # We use a synchronous Popen with bufsize=1 (line buffered)
-        # This is the most reliable way to stream on Windows
         process = subprocess.Popen(
             [sys.executable, "-u", str(script_path)],
             stdout=subprocess.PIPE,
@@ -132,6 +195,29 @@ def stream_occ_simulation():
             yield f"data: [LOG] CRITICAL ERROR: {str(e)}\n\n"
             yield "data: [SIMULATION_COMPLETE]\n\n"
 
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.get("/api/agent-notifications")
+async def stream_agent_notifications(request: Request):
+    """Holds an open connection to stream background warnings to all connected clients."""
+    # 1. Create a personal queue just for this specific UI component
+    client_queue = asyncio.Queue()
+    agent_message_clients.append(client_queue)
+    
+    async def event_generator():
+        try:
+            while True:
+                # Wait until a warning drops into this specific queue
+                message = await client_queue.get()
+                yield f"data: {message}\n\n"
+        except asyncio.CancelledError:
+            # This cleanly handles when the user closes the browser tab
+            pass
+        finally:
+            # Cleanup: remove the queue when the component disconnects
+            if client_queue in agent_message_clients:
+                agent_message_clients.remove(client_queue)
+                
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/chat")

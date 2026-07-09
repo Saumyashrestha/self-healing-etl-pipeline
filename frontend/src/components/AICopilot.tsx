@@ -15,9 +15,33 @@ export default function AICopilot() {
   const [isAgentThinking, setIsAgentThinking] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    const eventSource = new EventSource("http://127.0.0.1:8001/api/agent-notifications");
+
+    eventSource.onmessage = (event) => {
+      // NEW: Parse the JSON payload from the backend
+      try {
+        const data = JSON.parse(event.data);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'agent',
+            content: `🚨 **Proactive Alert:**\n\n${data.content}`,
+            requires_confirmation: data.requires_confirmation,
+            target_table: data.target_table
+          }
+        ]);
+      } catch (err) {
+        console.error("Failed to parse agent notification", err);
+      }
+    };
+
+    eventSource.onerror = (error) => console.error("Lost SSE connection", error);
+    return () => eventSource.close();
+  }, []); 
+
   const sendMessage = async (text: string) => {
     if (!text.trim()) return;
-
     setMessages(prev => [...prev, { role: 'user', content: text }]);
     setInput('');
     setIsAgentThinking(true);
@@ -28,9 +52,7 @@ export default function AICopilot() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text })
       });
-
       const data = await response.json();
-      
       setMessages(prev => [...prev, { 
         role: 'agent', 
         content: data.reply,
@@ -38,13 +60,12 @@ export default function AICopilot() {
         target_table: data.target_table
       }]);
     } catch (error) {
-      setMessages(prev => [...prev, { role: 'agent', content: `Error: Unable to connect to backend agent. ${error}` }]);
+      setMessages(prev => [...prev, { role: 'agent', content: `Error connecting to backend.` }]);
     } finally {
       setIsAgentThinking(false);
     }
   };
 
-  // The hidden command sent when a user clicks the UI button
   const handleConfirmation = (isConfirmed: boolean, tableName: string) => {
     if (isConfirmed) {
       sendMessage(`Yes, please proceed with execute_confirmed_maintenance on the ${tableName} table.`);
@@ -58,39 +79,49 @@ export default function AICopilot() {
   }, [messages]);
 
   return (
-    <div className="flex flex-col h-[600px] bg-slate-900 rounded-2xl overflow-hidden shadow-2xl border border-slate-800">
-      <div className="bg-slate-800 p-4 border-b border-slate-700 flex justify-between items-center">
-        <span className="text-slate-300 font-mono text-sm">agent@lakehouse:~$</span>
-        {isAgentThinking && <span className="text-blue-400 animate-pulse text-xs font-mono">Agent thinking...</span>}
+    <div className="flex flex-col h-[650px] bg-[#0f172a] rounded-xl overflow-hidden shadow-2xl border border-slate-700 font-sans">
+      {/* Header */}
+      <div className="bg-slate-800/80 backdrop-blur-sm p-4 border-b border-slate-700 flex justify-between items-center shadow-sm z-10">
+        <div className="flex items-center gap-3">
+          <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></div>
+          <span className="text-slate-200 font-semibold tracking-wide text-sm">Lakehouse Copilot</span>
+        </div>
+        {isAgentThinking && <span className="text-blue-400 text-xs font-medium animate-pulse">Agent is typing...</span>}
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4">
+      {/* Chat Area */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth bg-gradient-to-b from-[#0f172a] to-slate-900">
         {messages.map((m, i) => (
           <div key={i} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
-            <div className={`max-w-[85%] p-3 rounded-lg text-sm ${
-              m.role === 'user' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200'
+            <div className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap shadow-md ${
+              m.role === 'user' 
+                ? 'bg-blue-600 text-white rounded-br-none' 
+                : 'bg-slate-800 text-slate-200 border border-slate-700 rounded-bl-none'
             }`}>
               {m.content}
             </div>
             
-            {/* The Dynamic HITL UI Component */}
+            {/* Action Buttons */}
             {m.requires_confirmation && m.target_table && (
-              <div className="mt-2 p-3 border border-amber-500/30 bg-amber-900/20 rounded-lg max-w-[85%]">
-                <p className="text-sm text-amber-200 font-medium mb-3">
-                  ⚠️ Require authorization to run PySpark Compaction on: <span className="font-bold">{m.target_table}</span>
-                </p>
-                <div className="flex gap-2">
+              <div className="mt-3 p-4 border border-rose-500/30 bg-rose-950/30 rounded-xl max-w-[85%] backdrop-blur-md shadow-lg ml-2">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="text-lg">🛠️</span>
+                  <p className="text-sm text-rose-200 font-medium">
+                    Maintenance required on: <span className="font-bold text-white">{m.target_table}</span>
+                  </p>
+                </div>
+                <div className="flex gap-3">
                   <button 
                     onClick={() => handleConfirmation(true, m.target_table!)}
-                    className="px-3 py-1.5 bg-amber-600 text-white rounded text-xs font-semibold hover:bg-amber-700 transition-colors"
+                    className="flex-1 px-4 py-2 bg-rose-600 text-white rounded-lg text-xs font-bold tracking-wide hover:bg-rose-500 transition-all shadow-md hover:shadow-rose-500/20"
                   >
-                    Confirm & Execute
+                    Execute Compaction
                   </button>
                   <button 
                     onClick={() => handleConfirmation(false, m.target_table!)}
-                    className="px-3 py-1.5 bg-slate-600 text-slate-200 rounded text-xs font-semibold hover:bg-slate-500 transition-colors"
+                    className="px-4 py-2 bg-slate-700 text-slate-300 rounded-lg text-xs font-bold hover:bg-slate-600 transition-all"
                   >
-                    Cancel
+                    Dismiss
                   </button>
                 </div>
               </div>
@@ -99,16 +130,27 @@ export default function AICopilot() {
         ))}
       </div>
 
-      <div className="p-4 bg-slate-800 border-t border-slate-700">
-        <input 
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && sendMessage(input)}
-          placeholder="Ask about table health or request maintenance..."
-          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-          disabled={isAgentThinking}
-        />
+      {/* Input Area */}
+      <div className="p-4 bg-slate-800/80 backdrop-blur-md border-t border-slate-700">
+        <div className="relative">
+          <input 
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && sendMessage(input)}
+            placeholder="Ask a question or request maintenance..."
+            className="w-full bg-slate-900 border border-slate-600 rounded-xl pl-4 pr-12 py-3 text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all shadow-inner"
+            disabled={isAgentThinking}
+          />
+          <button 
+            onClick={() => sendMessage(input)}
+            className="absolute right-2 top-1.5 p-1.5 bg-blue-600 hover:bg-blue-500 rounded-lg text-white transition-colors"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   );
