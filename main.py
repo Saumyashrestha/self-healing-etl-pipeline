@@ -93,9 +93,13 @@ agent_tools = [
 agent_message_queue = asyncio.Queue()
 
 agent_message_clients = []
+maintenance_in_progress = {"active": False}
 
 async def run_health_audit():
     """Silently fetches metrics and asks the LLM if a warning is needed."""
+    if maintenance_in_progress["active"]:   # <-- ADD THIS
+        print("[Agent Monitor] Skipping health audit — maintenance currently in progress.")
+        return
     try:
         orders_metrics = await run_in_threadpool(get_table_metrics, "orders")
         items_metrics = await run_in_threadpool(get_table_metrics, "order_items")
@@ -223,6 +227,40 @@ async def stream_agent_notifications(request: Request):
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
     try:
+        # --- DETERMINISTIC CONFIRMATION INTERCEPTOR ---
+        confirm_match = re.match(r"Yes, please proceed with execute_confirmed_maintenance on the (.+) table\.", request.message.strip())
+        cancel_match = re.match(r"No, cancel the maintenance operation on (.+)\.", request.message.strip())
+
+        if confirm_match:
+            raw_names = confirm_match.group(1)
+            tables = [t.strip() for t in raw_names.split(',')]
+
+            maintenance_in_progress["active"] = True
+            try:
+                maintenance_results = []
+                for t in tables:
+                    res = await run_in_threadpool(execute_table_maintenance, t)
+                    maintenance_results.append(res)
+            finally:
+                maintenance_in_progress["active"] = False
+
+            # Fetch real post-maintenance health directly -- no LLM guessing involved
+            health_reports = []
+            for t in tables:
+                metrics = await run_in_threadpool(get_table_metrics, t)
+                health_reports.append(f"[{t.upper()}]: {metrics}")
+
+            reply = (
+                "✅ **Maintenance complete.**\n\n"
+                + "\n".join(maintenance_results)
+                + "\n\n**Post-Maintenance Health:**\n"
+                + "\n".join(health_reports)
+            )
+            return {"reply": reply}
+
+        if cancel_match:
+            return {"reply": f"Understood — maintenance on {cancel_match.group(1)} has been cancelled. No changes were made."}
+        
         messages = [
             {
                 "role": "system", 
@@ -244,46 +282,47 @@ async def chat_endpoint(request: ChatRequest):
             {"role": "user", "content": request.message}
         ]
 
-        response = await run_in_threadpool(
-            client.chat.completions.create,
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            tools=agent_tools,
-            tool_choice="auto"
-        )
+        max_iterations = 5
+        for _ in range(max_iterations):
+            response = await run_in_threadpool(
+                client.chat.completions.create,
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                tools=agent_tools,
+                tool_choice="auto"
+            )
 
-        response_message = response.choices[0].message
-        content_text = response_message.content or ""
-        
-        has_tool_call = False
-        function_name = None
-        function_args = {}
-        tool_call_id = "call_fallback"
+            response_message = response.choices[0].message
+            content_text = response_message.content or ""
 
-        # 1. Standard API Tool Call
-        if response_message.tool_calls:
-            has_tool_call = True
-            tool_call = response_message.tool_calls[0]
-            function_name = tool_call.function.name
-            function_args = json.loads(tool_call.function.arguments)
-            tool_call_id = tool_call.id
-            messages.append(response_message)
-            
-        # 2. BULLETPROOF XML PARSER (Catches Llama-3's leaked tags)
-        elif "<function=" in content_text:
-            match = re.search(r'<function=(\w+)(.*?)(?:</function>|>)?', content_text)
-            if match:
+            has_tool_call = False
+            function_name = None
+            function_args = {}
+            tool_call_id = "call_fallback"
+
+            if response_message.tool_calls:
                 has_tool_call = True
-                function_name = match.group(1)
-                try:
-                    function_args = json.loads(match.group(2).strip())
-                except:
-                    function_args = {}
-                messages.append({"role": "assistant", "content": content_text})
-
-        # --- EXECUTE THE TOOL IF DETECTED ---
-        if has_tool_call and function_name:
+                tool_call = response_message.tool_calls[0]
+                function_name = tool_call.function.name
+                function_args = json.loads(tool_call.function.arguments)
+                ool_call_id = tool_call.id
+                messages.append(response_message.model_dump(exclude_none=True))   # <-- was: messages.append(response_message)
             
+            elif "<function=" in content_text:
+                match = re.search(r'<function=(\w+)(.*?)(?:</function>|>)?', content_text)
+                if match:
+                    has_tool_call = True
+                    function_name = match.group(1)
+                    try:
+                        function_args = json.loads(match.group(2).strip())
+                    except:
+                        function_args = {}
+                    messages.append({"role": "assistant", "content": content_text})
+
+            if not has_tool_call:
+                # Model gave a plain final answer -- we're done
+                return {"reply": content_text if content_text else "How can I assist you?"}
+
             # --- INTERCEPTOR: The HITL Guard ---
             if function_name == "propose_maintenance":
                 target = function_args.get("table_names", function_args.get("table_name", "all tables"))
@@ -296,7 +335,6 @@ async def chat_endpoint(request: ChatRequest):
             tool_result = ""
             if function_name == "get_table_health":
                 try:
-                    # Fallback check just in case the LLM passes the old singular key
                     raw_names = function_args.get("table_names", function_args.get("table_name", ""))
                     tables = [t.strip() for t in raw_names.split(',')]
                     reports = []
@@ -306,31 +344,33 @@ async def chat_endpoint(request: ChatRequest):
                     tool_result = " \n ".join(reports)
                 except Exception as e:
                     tool_result = f"Error: {str(e)}"
-                    
+
             elif function_name == "execute_confirmed_maintenance":
                 raw_names = function_args.get("table_names", function_args.get("table_name", ""))
                 tables = [t.strip() for t in raw_names.split(',')]
-                results = []
-                for t in tables:
-                    res = await run_in_threadpool(execute_table_maintenance, t)
-                    results.append(res)
-                tool_result = " \n ".join(results)
+                maintenance_in_progress["active"] = True
+                try:
+                    results = []
+                    for t in tables:
+                        res = await run_in_threadpool(execute_table_maintenance, t)
+                        results.append(res)
+                    tool_result = " \n ".join(results)
+                finally:
+                    maintenance_in_progress["active"] = False
 
             elif function_name == "analyze_occ_crash_log":
                 log_path = BASE_DIR / "logs" / "occ_error.log"
                 crash_time = "[Timestamp Not Found]"
-                error_content = "Log file not found."  # <-- FIX: Defined here
-                
+                error_content = "Log file not found."
+
                 if log_path.exists():
                     with open(log_path, "r") as f:
-                        error_content = f.read()  # <-- FIX: Read the file
-                        
-                    # Extract the timestamp from the content we just read
+                        error_content = f.read()
                     for line in error_content.split('\n'):
                         if "CRASH TIMESTAMP:" in line:
                             crash_time = line.split("CRASH TIMESTAMP:")[1].strip()
                             break
-                
+
                 tool_result = (
                     "SYSTEM INSTRUCTION: You MUST output EXACTLY this text. Use DOUBLE NEWLINES (\\n\\n) between every line so the frontend renders it correctly.\n\n"
                     "1. CHRONOLOGICAL TIMELINE:\n\n"
@@ -352,16 +392,9 @@ async def chat_endpoint(request: ChatRequest):
                 "name": function_name,
                 "content": tool_result,
             })
-            
-            final_response = await run_in_threadpool(
-                client.chat.completions.create,
-                model="llama-3.3-70b-versatile",
-                messages=messages
-            )
-            return {"reply": final_response.choices[0].message.content}
-            
-        else:
-            return {"reply": content_text if content_text else "How can I assist you?"}
+            # loop continues -- model gets to see the tool result and decide what to do next
+
+        return {"reply": "I wasn't able to complete this request within the allowed number of steps."}
 
     except Exception as e:
         return {"reply": f"Agent error: {str(e)}"}

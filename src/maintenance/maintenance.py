@@ -1,5 +1,6 @@
 import os
-from pyspark.sql import SparkSession
+from src.monitoring.history_logger import log_snapshot_with_session
+from src.monitoring.spark_session import get_shared_spark
 
 def run_maintenance():
     print("Initializing Spark for Lakehouse Maintenance...")
@@ -7,14 +8,7 @@ def run_maintenance():
     root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     warehouse_path = os.path.join(root_dir, "warehouse")
 
-    spark = SparkSession.builder \
-        .appName("Iceberg-Maintenance") \
-        .config("spark.jars.packages", "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0") \
-        .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
-        .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog") \
-        .config("spark.sql.catalog.local.type", "hadoop") \
-        .config("spark.sql.catalog.local.warehouse", warehouse_path) \
-        .getOrCreate()
+    spark = get_shared_spark()
 
     spark.sparkContext.setLogLevel("ERROR")
 
@@ -49,7 +43,6 @@ def run_maintenance():
     """).show(vertical=True)
 
     print("\nMaintenance procedures complete! The tables are healed.")
-    spark.stop()
 
 def execute_table_maintenance(table_name: str) -> str:
     """
@@ -59,14 +52,7 @@ def execute_table_maintenance(table_name: str) -> str:
     root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     warehouse_path = os.path.join(root_dir, "warehouse")
 
-    spark = SparkSession.builder \
-        .appName("Iceberg-Agent-Maintenance") \
-        .config("spark.jars.packages", "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0") \
-        .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
-        .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog") \
-        .config("spark.sql.catalog.local.type", "hadoop") \
-        .config("spark.sql.catalog.local.warehouse", warehouse_path) \
-        .getOrCreate()
+    spark = get_shared_spark()
 
     spark.sparkContext.setLogLevel("ERROR")
 
@@ -88,14 +74,13 @@ def execute_table_maintenance(table_name: str) -> str:
                 retain_last => 1
             )
         """)
+
+        log_snapshot_with_session(spark, table_name, "post_maintenance")
         
         return f"SUCCESS: Maintenance executed for {table_name}. Small files crushed, position deletes resolved, manifests rewritten, and old snapshots expired."
         
     except Exception as e:
         return f"FAILED: Could not run maintenance on {table_name}. Error: {str(e)}"
-    finally:
-        if 'spark' in locals():
-            spark.stop()
 
 if __name__ == "__main__":
     run_maintenance()

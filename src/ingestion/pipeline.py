@@ -1,9 +1,11 @@
 import os
 import random
 from urllib.parse import urlparse
+import psycopg2
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import current_timestamp
 from dotenv import load_dotenv
+from src.monitoring.history_logger import log_snapshot_with_session
+from src.monitoring.spark_session import get_shared_spark
 
 # Load credentials
 load_dotenv()
@@ -13,154 +15,233 @@ jdbc_url = f"jdbc:postgresql://{parsed_url.hostname}:{parsed_url.port}{parsed_ur
 db_user = parsed_url.username
 db_password = parsed_url.password
 
+
+def get_pg_connection():
+    return psycopg2.connect(
+        host=parsed_url.hostname,
+        port=parsed_url.port,
+        dbname=parsed_url.path.lstrip("/"),
+        user=parsed_url.username,
+        password=parsed_url.password
+    )
+
+
+def get_watermark(pg_conn, source_name):
+    cur = pg_conn.cursor()
+    cur.execute("SELECT last_loaded_at FROM pipeline_watermark WHERE source_name = %s", (source_name,))
+    row = cur.fetchone()
+    cur.close()
+    return row[0] if row else None
+
+
+def initialize_watermark(pg_conn, source_name):
+    """Sets the watermark to the current Postgres server time. Used once, on first run."""
+    cur = pg_conn.cursor()
+    cur.execute("SELECT NOW();")
+    now = cur.fetchone()[0]
+    cur.execute("""
+        INSERT INTO pipeline_watermark (source_name, last_loaded_at, updated_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (source_name) DO UPDATE SET last_loaded_at = EXCLUDED.last_loaded_at, updated_at = NOW()
+    """, (source_name, now))
+    pg_conn.commit()
+    cur.close()
+    return now
+
+
+def update_watermark(pg_conn, source_name, new_timestamp):
+    cur = pg_conn.cursor()
+    cur.execute("""
+        INSERT INTO pipeline_watermark (source_name, last_loaded_at, updated_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (source_name) DO UPDATE SET last_loaded_at = EXCLUDED.last_loaded_at, updated_at = NOW()
+    """, (source_name, new_timestamp))
+    pg_conn.commit()
+    cur.close()
+
+
+def mutate_postgres(pg_conn, insert_count, update_count, customer_ids, product_ids, id_counters):
+    """Directly mutates the Postgres OLTP source: advances some existing orders,
+    inserts brand-new orders + their order_items. This is the real 'upstream activity'
+    that the incremental load will later pick up via the watermark."""
+    cur = pg_conn.cursor()
+
+    # --- Updates: advance some existing Pending orders to Shipped ---
+    if update_count > 0:
+        cur.execute("""
+            SELECT order_id FROM orders WHERE status = 'Pending' ORDER BY random() LIMIT %s
+        """, (update_count,))
+        ids_to_update = [r[0] for r in cur.fetchall()]
+        for oid in ids_to_update:
+            cur.execute("""
+                UPDATE orders SET status = 'Shipped', updated_at = NOW() WHERE order_id = %s
+            """, (oid,))
+
+    # --- Inserts: brand-new orders, each with 1-3 new order_items ---
+    for _ in range(insert_count):
+        id_counters["order_id"] += 1
+        new_order_id = id_counters["order_id"]
+        customer_id = random.choice(customer_ids)
+        amount = round(random.uniform(10.0, 500.0), 2)
+
+        cur.execute("""
+            INSERT INTO orders (order_id, customer_id, order_date, amount, status, updated_at)
+            VALUES (%s, %s, CURRENT_DATE, %s, 'Pending', NOW())
+        """, (new_order_id, customer_id, amount))
+
+        num_items = random.randint(1, 3)
+        for _ in range(num_items):
+            id_counters["item_id"] += 1
+            new_item_id = id_counters["item_id"]
+            product_id = random.choice(product_ids)
+            price = round(random.uniform(5.0, 200.0), 2)
+
+            cur.execute("""
+                INSERT INTO order_items (item_id, order_id, product_id, price, created_at)
+                VALUES (%s, %s, %s, %s, NOW())
+            """, (new_item_id, new_order_id, product_id, price))
+
+    pg_conn.commit()
+    cur.close()
+
+
 def run_pipeline(log_queue=None):
-    # --- Helper function to route logs to the web stream OR the terminal ---
     def emit_log(msg):
         if log_queue:
             log_queue.put(msg + "\n")
         else:
             print(msg)
 
+    pg_conn = None
     try:
         emit_log("Initializing Spark Session...")
-        
-        spark = SparkSession.builder \
-            .appName("Iceberg-ETL-Pipeline") \
-            .config("spark.jars.packages", "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0,org.postgresql:postgresql:42.7.3") \
-            .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
-            .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog") \
-            .config("spark.sql.catalog.local.type", "hadoop") \
-            .config("spark.sql.catalog.local.warehouse", f"{os.getcwd()}/warehouse") \
-            .getOrCreate()
+
+        spark = get_shared_spark()
 
         spark.sparkContext.setLogLevel("ERROR")
         spark.sql("CREATE NAMESPACE IF NOT EXISTS local.db")
 
-        emit_log("1. Extracting and loading 'orders' (Format V2 + Merge-On-Read)...")
-        df_orders = spark.read.format("jdbc").option("url", jdbc_url).option("dbtable", "orders") \
-            .option("user", db_user).option("password", db_password).option("driver", "org.postgresql.Driver").load()
-            
-        df_orders = df_orders.withColumn("ingestion_timestamp", current_timestamp())
+        pg_conn = get_pg_connection()
 
-        df_orders.writeTo("local.db.orders") \
-            .tableProperty("format-version", "2") \
-            .tableProperty("write.merge.mode", "merge-on-read") \
-            .tableProperty("write.update.mode", "merge-on-read") \
-            .createOrReplace()
+        # --- GUARD: only do the full initial load if tables don't exist yet ---
+        orders_exists = spark.catalog.tableExists("local.db.orders")
+        items_exists = spark.catalog.tableExists("local.db.order_items")
 
-        emit_log("2. Extracting and loading 'order_items'...")
-        df_items = spark.read.format("jdbc").option("url", jdbc_url).option("dbtable", "order_items") \
-            .option("user", db_user).option("password", db_password).option("driver", "org.postgresql.Driver").load()
-            
-        df_items = df_items.withColumn("ingestion_timestamp", current_timestamp())
-        
-        df_items.writeTo("local.db.order_items") \
-            .tableProperty("format-version", "2") \
-            .tableProperty("write.merge.mode", "merge-on-read") \
-            .tableProperty("write.update.mode", "merge-on-read") \
-            .createOrReplace()
+        if not orders_exists:
+            emit_log("1. Extracting and loading 'orders' (Format V2 + Merge-On-Read) — first run, full load...")
+            df_orders = spark.read.format("jdbc").option("url", jdbc_url).option("dbtable", "orders") \
+                .option("user", db_user).option("password", db_password).option("driver", "org.postgresql.Driver").load()
 
-        emit_log("3. Simulating a Realistic UPSERT Workload (50 Micro-batches)...")
+            df_orders.writeTo("local.db.orders") \
+                .tableProperty("format-version", "2") \
+                .tableProperty("write.merge.mode", "merge-on-read") \
+                .tableProperty("write.update.mode", "merge-on-read") \
+                .createOrReplace()
+        else:
+            emit_log("1. 'orders' table already exists — skipping full reload, will merge incrementally.")
+
+        if not items_exists:
+            emit_log("2. Extracting and loading 'order_items' — first run, full load...")
+            df_items = spark.read.format("jdbc").option("url", jdbc_url).option("dbtable", "order_items") \
+                .option("user", db_user).option("password", db_password).option("driver", "org.postgresql.Driver").load()
+
+            df_items.writeTo("local.db.order_items") \
+                .tableProperty("format-version", "2") \
+                .tableProperty("write.merge.mode", "merge-on-read") \
+                .tableProperty("write.update.mode", "merge-on-read") \
+                .createOrReplace()
+        else:
+            emit_log("2. 'order_items' table already exists — skipping full reload, will merge incrementally.")
+
+        log_snapshot_with_session(spark, "orders", "baseline" if not orders_exists else "run_start")
+        log_snapshot_with_session(spark, "order_items", "baseline" if not items_exists else "run_start")
+
+        # --- Initialize watermarks if this is the first run ---
+        wm_orders = get_watermark(pg_conn, "orders")
+        if wm_orders is None:
+            wm_orders = initialize_watermark(pg_conn, "orders")
+            emit_log(f"Initialized 'orders' watermark to {wm_orders}")
+
+        wm_items = get_watermark(pg_conn, "order_items")
+        if wm_items is None:
+            wm_items = initialize_watermark(pg_conn, "order_items")
+            emit_log(f"Initialized 'order_items' watermark to {wm_items}")
+
+        # --- Pull reference data needed to generate realistic new rows ---
+        cur = pg_conn.cursor()
+        cur.execute("SELECT DISTINCT customer_id FROM orders")
+        customer_ids = [r[0] for r in cur.fetchall()]
+        cur.execute("SELECT DISTINCT product_id FROM order_items")
+        product_ids = [r[0] for r in cur.fetchall()]
+        cur.execute("SELECT COALESCE(MAX(order_id), 0) FROM orders")
+        max_order_id = cur.fetchone()[0]
+        cur.execute("SELECT COALESCE(MAX(item_id), 0) FROM order_items")
+        max_item_id = cur.fetchone()[0]
+        cur.close()
+
+        id_counters = {"order_id": max_order_id, "item_id": max_item_id}
+
+        emit_log("3. Simulating a Realistic UPSERT Workload from Postgres (50 Micro-batches)...")
 
         for i in range(50):
-            emit_log(f"   > Running MERGE batch {i + 1}/50...")
-            
-            # Generate a massive random offset so our "new" insert IDs never collide
-            offset = random.randint(100000, 900000) + (i * 1000)
+            batch_type = random.choice(["insert_only", "update_only", "both", "both", "both"])
+            insert_count = random.randint(1, 8) if batch_type in ("insert_only", "both") else 0
+            update_count = random.randint(1, 6) if batch_type in ("update_only", "both") else 0
 
-            # --- DYNAMIC BATCH: ORDERS ---
-            spark.sql(f"""
-                CREATE OR REPLACE TEMP VIEW batch_orders AS
-                
-                -- THE UPDATES (2 Rows): Keep original order_date, only change status and ingestion time
-                SELECT 
-                    order_id, 
-                    customer_id, 
-                    order_date,       -- Kept original
-                    amount, 
-                    'Shipped' as status, 
-                    current_timestamp() as ingestion_timestamp 
-                FROM (
-                    SELECT * FROM local.db.orders WHERE status = 'Pending' ORDER BY rand() LIMIT 2
-                )
-                
-                UNION ALL
-                
-                -- THE INSERTS (3 Rows): Offset ID, brand new order_date, Pending status
-                SELECT 
-                    order_id + {offset} as order_id, 
-                    customer_id, 
-                    current_date() as order_date, -- BRAND NEW DATE
-                    amount, 
-                    'Pending' as status, 
-                    current_timestamp() as ingestion_timestamp 
-                FROM (
-                    SELECT * FROM local.db.orders LIMIT 3
-                )
-            """)
-            
-            # --- DYNAMIC BATCH: ORDER ITEMS ---
-            spark.sql(f"""
-                CREATE OR REPLACE TEMP VIEW batch_items AS
-                
-                -- THE UPDATES (2 Rows): Only updating the ingestion metadata
-                SELECT 
-                    item_id, 
-                    order_id, 
-                    product_id, 
-                    price, 
-                    current_timestamp() as ingestion_timestamp 
-                FROM (
-                    SELECT * FROM local.db.order_items ORDER BY rand() LIMIT 2
-                )
-                
-                UNION ALL
-                
-                -- THE INSERTS (3 Rows): Offset both IDs to link to the new parent orders
-                SELECT 
-                    item_id + {offset} as item_id, 
-                    order_id + {offset} as order_id, 
-                    product_id, 
-                    price, 
-                    current_timestamp() as ingestion_timestamp 
-                FROM (
-                    SELECT * FROM local.db.order_items LIMIT 3
-                )
-            """)
+            emit_log(f"   > Running batch {i + 1}/50... [{batch_type}] inserts={insert_count} updates={update_count}")
 
-            orders_inserts = spark.sql("SELECT count(*) as c FROM batch_orders WHERE status = 'Pending'").collect()[0]['c']
-            orders_updates = spark.sql("SELECT count(*) as c FROM batch_orders WHERE status = 'Shipped'").collect()[0]['c']
-            items_inserts = spark.sql(f"SELECT count(*) as c FROM batch_items WHERE item_id >= {offset}").collect()[0]['c']
-            items_updates = spark.sql(f"SELECT count(*) as c FROM batch_items WHERE item_id < {offset}").collect()[0]['c']
+            # --- STEP A: Mutate the real Postgres OLTP source ---
+            mutate_postgres(pg_conn, insert_count, update_count, customer_ids, product_ids, id_counters)
 
-            emit_log(f"      [Audit] Orders -> Inserts: {orders_inserts} | Updates: {orders_updates}")
-            emit_log(f"      [Audit] Items  -> Inserts: {items_inserts} | Updates: {items_updates}")
+            # --- STEP B: Pull only what changed since the last watermark ---
+            orders_query = f"(SELECT * FROM orders WHERE updated_at > '{wm_orders}') AS inc_orders"
+            items_query = f"(SELECT * FROM order_items WHERE created_at > '{wm_items}') AS inc_items"
 
-            # Execute MERGE for Orders
-            spark.sql("""
-                MERGE INTO local.db.orders t
-                USING batch_orders s
-                ON t.order_id = s.order_id
-                WHEN MATCHED THEN UPDATE SET t.status = s.status, t.ingestion_timestamp = s.ingestion_timestamp
-                WHEN NOT MATCHED THEN INSERT *
-            """)
-            
-            # Execute MERGE for Order Items
-            spark.sql("""
-                MERGE INTO local.db.order_items t
-                USING batch_items s
-                ON t.item_id = s.item_id
-                WHEN MATCHED THEN UPDATE SET t.ingestion_timestamp = s.ingestion_timestamp
-                WHEN NOT MATCHED THEN INSERT *
-            """)
+            df_orders_inc = spark.read.format("jdbc").option("url", jdbc_url).option("dbtable", orders_query) \
+                .option("user", db_user).option("password", db_password).option("driver", "org.postgresql.Driver").load()
+            df_items_inc = spark.read.format("jdbc").option("url", jdbc_url).option("dbtable", items_query) \
+                .option("user", db_user).option("password", db_password).option("driver", "org.postgresql.Driver").load()
+
+            orders_count = df_orders_inc.count()
+            items_count = df_items_inc.count()
+            emit_log(f"      [Audit] Orders changed: {orders_count} | Items changed: {items_count}")
+
+            # --- STEP C: Merge into Iceberg ---
+            if orders_count > 0:
+                df_orders_inc.createOrReplaceTempView("batch_orders")
+                spark.sql("""
+                    MERGE INTO local.db.orders t
+                    USING batch_orders s
+                    ON t.order_id = s.order_id
+                    WHEN MATCHED THEN UPDATE SET t.status = s.status, t.updated_at = s.updated_at
+                    WHEN NOT MATCHED THEN INSERT *
+                """)
+                max_updated = df_orders_inc.agg({"updated_at": "max"}).collect()[0][0]
+                wm_orders = max_updated
+                update_watermark(pg_conn, "orders", wm_orders)
+
+            if items_count > 0:
+                df_items_inc.createOrReplaceTempView("batch_items")
+                spark.sql("""
+                    MERGE INTO local.db.order_items t
+                    USING batch_items s
+                    ON t.item_id = s.item_id
+                    WHEN NOT MATCHED THEN INSERT *
+                """)
+                max_created = df_items_inc.agg({"created_at": "max"}).collect()[0][0]
+                wm_items = max_created
+                update_watermark(pg_conn, "order_items", wm_items)
+
+            log_snapshot_with_session(spark, "orders", f"batch_{i+1}")
+            log_snapshot_with_session(spark, "order_items", f"batch_{i+1}")
 
         emit_log("Pipeline complete. The tables are successfully loaded and degraded.")
-        
+
     except Exception as e:
         emit_log(f"CRITICAL ERROR: {str(e)}")
     finally:
-        if 'spark' in locals():
-            spark.stop()
+        if pg_conn:
+            pg_conn.close()
         if log_queue:
             log_queue.put(None)
 

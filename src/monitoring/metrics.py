@@ -1,6 +1,7 @@
 import os
 import sys
 from pyspark.sql import SparkSession
+from src.monitoring.spark_session import get_shared_spark
 
 def get_spark_session():
     """Helper function to initialize Spark consistently."""
@@ -8,14 +9,7 @@ def get_spark_session():
     root_dir = os.path.dirname(os.path.dirname(current_script_dir))
     warehouse_path = os.path.join(root_dir, "warehouse")
     
-    spark = SparkSession.builder \
-        .appName("Iceberg-Metrics") \
-        .config("spark.jars.packages", "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0") \
-        .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
-        .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog") \
-        .config("spark.sql.catalog.local.type", "hadoop") \
-        .config("spark.sql.catalog.local.warehouse", warehouse_path) \
-        .getOrCreate()
+    spark = get_shared_spark()
     
     spark.sparkContext.setLogLevel("ERROR")
     return spark
@@ -106,8 +100,6 @@ def capture_metrics(phase_label):
                 
         except Exception as e:
             print(f"Failed to capture {table_name}: {e}")
-
-    spark.stop()
 
 if __name__ == "__main__":
     phase = sys.argv[1] if len(sys.argv) > 1 else "current_state"
