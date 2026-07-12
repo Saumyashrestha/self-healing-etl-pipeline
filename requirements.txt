@@ -8,3 +8,8 @@ fastapi
 uvicorn
 python-dotenv
 psycopg2-binary
+
+# AI Agent & Scheduling
+groq
+apscheduler
+mcp

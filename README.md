@@ -201,11 +201,15 @@ The dashboard connects to the MCP server via a single **persistent SSE client co
 
 ---
 
-## 7. Running the Project
+### 7. Running the Project
 
-1. Ensure Postgres is running and reachable via `DATABASE_URL` in `.env`.
-2. Run the one-time schema setup (`run_ddl_setup.py`) to add `updated_at`/`created_at` columns and create the `pipeline_watermark` table, if not already applied.
-3. Start the FastMCP tool server (port 8000).
-4. Start the FastAPI agent backend (`main.py`, port 8001) — requires `GROQ_API_KEY` in `.env`.
-5. Start the frontend (`npm run dev` in `frontend/`).
-6. From the dashboard: click **Trigger 50-Batch Load** to degrade a table, then use the chat panel to ask "is the orders table healthy?" or say "clean it up" to confirm and run maintenance.
+
+1. Install Python dependencies: pip install -r requirements.txt (from the project root, ideally inside a virtual environment).
+
+2. Install frontend dependencies: npm install (from the frontend/ folder).
+3. Ensure Postgres is running and reachable via DATABASE_URL in .env.
+4. Run the one-time schema setup (scripts/one_time_schema_setup.py) to add updated_at/created_at columns and create the pipeline_watermark table, if not already applied.
+5. Start the FastMCP tool server (port 8000).
+6. Start the FastAPI agent backend (main.py, port 8001) — requires GROQ_API_KEY in .env.
+7. Start the frontend (npm run dev in frontend/).
+8. From the dashboard: click Trigger 50-Batch Load to degrade a table, then use the chat panel to ask "is the orders table healthy?" or say "clean it up" to confirm and run maintenance.
