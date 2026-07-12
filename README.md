@@ -174,16 +174,16 @@ Maintenance can be requested either by asking the copilot directly ("clean up th
 
 This is a stretch-goal feature demonstrating what happens when two writers touch the same Iceberg partition at the same time, and how the agent can explain that failure afterward in plain language.
 
-** An isolated test table. **
+**An isolated test table.**
 This simulation does not run against the orders or order_items fact tables used elsewhere in the project. It creates and uses its own dedicated Iceberg table (db.occ_test), rebuilt fresh on every run with a small set of partitioned baseline rows. This keeps the concurrency demonstration fully isolated from the pipeline and maintenance workflows, so triggering it never affects the fragmentation metrics or history shown on the main dashboard.
 
-** How it's run. **
+**How it's run.**
 The simulation is triggered from the frontend's OCC tab, which calls the backend's /api/simulate-occ endpoint. This spins up the test table, then launches two Spark processes concurrently as separate OS processes: Worker A reads a partition to establish its snapshot baseline, then deliberately pauses to simulate real processing time before attempting to commit an update. Worker B reads the same partition but commits its own update almost immediately. Because Worker B commits first, the table advances to a new snapshot before Worker A gets a chance to commit — so when Worker A finally attempts its write, Iceberg detects that Worker A's baseline no longer matches the table's current state and rejects the commit. This is Iceberg's optimistic concurrency control working as intended: rather than silently overwriting Worker B's change, the conflicting commit is refused outright.
 
-** Live visualization. **
+**Live visualization.**
 The OCCVisualizer component consumes this stream and displays the two workers' progress, the test table's state before and after, and the moment of conflict, in real time as it happens.
 
-** Explaining the conflict in chat. **
+**Explaining the conflict in chat.**
 Every meaningful event in the simulation — Worker A's baseline read, Worker B's successful commit, and Worker A's rejected commit — is logged with a real timestamp. Once a run has completed, asking the copilot something like "what is the OCC conflict that occurred?" produces an explanation built directly from those logged timestamps: the actual time elapsed between each event, the real error Iceberg raised, and a plain-language account of why the commit was rejected and what it means for data integrity. 
 
 ---
