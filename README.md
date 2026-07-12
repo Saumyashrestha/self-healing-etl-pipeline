@@ -100,7 +100,7 @@ The pipeline follows a genuine **watermark-based CDC (change data capture)** pat
    - **Advances the watermark** to the max timestamp actually processed, only after a successful merge.
    - Logs a real health snapshot to the history log after every batch.
 
-This means the "new" data in each batch genuinely originates from the OLTP source system, matching real-world CDC pipelines — not a self-referential trick reading Iceberg's own prior state.
+This means the "new" data in each batch genuinely originates from the OLTP source system, matching real-world CDC pipelines.
 
 ### 4.2 Small-File Problem Simulation
 
@@ -118,7 +118,7 @@ Two related but distinct components:
 - **`metrics.py` — `get_table_metrics()`**: an on-demand, live query against Iceberg's `.files`, `.snapshots`, `.manifests` metadata tables. Computes a weighted health score (70% fragmentation / 30% delete-bloat). Used by the chat agent and the MCP `get_table_health` tool for point-in-time answers.
 - **`history_logger.py` — `log_snapshot_with_session()`**: appends **one permanent row** to a per-table JSONL log (`warehouse/history/{table}_history.jsonl`) every time it's called — during each pipeline batch and again after maintenance. This is what powers the dashboard's trend chart, giving it a real, continuous timeline rather than a single before/after comparison.
 
-**Total Files metric.** The `files` value tracked here is deliberately computed as **data files + delete files combined**, not data files alone. This matters because both tables use merge-on-read: every `MERGE` containing an update writes a small new data file for the changed rows *and* a small delete file marking the old version as superseded, without rewriting the whole table. Since Iceberg always creates exactly one new snapshot per commit — regardless of how much data changed — but a single commit can contribute more than one new physical file whenever it includes updates, the "Total Files" line naturally climbs faster than the "Snapshots" line over time on the dashboard chart. This divergence is a real, textbook signature of merge-on-read delete-file bloat, and is exactly what the trend chart is designed to surface.
+**Total Files metric.** The `files` value tracked here is deliberately computed as **data files + delete files combined**, not data files alone. This matters because both tables use merge-on-read: every `MERGE` containing an update writes a small new data file for the changed rows *and* a small delete file marking the old version as superseded, without rewriting the whole table. Since Iceberg always creates exactly one new snapshot per commit — regardless of how much data changed — but a single commit can contribute more than one new physical file whenever it includes updates, the "Total Files" line naturally climbs faster than the "Snapshots" line over time on the dashboard chart. 
 
 ### 4.4 Maintenance (`src/maintenance/maintenance.py`)
 
@@ -158,29 +158,33 @@ All components (pipeline, maintenance, metrics, deep telemetry) share **one long
 | `/api/agent-notifications` | GET (SSE) | Streams proactive health alerts to all connected clients |
 | `/api/simulate-occ` | GET (SSE) | Runs and live-streams the OCC concurrency simulation subprocess |
 
-### 5.3 `/chat` Endpoint Logic
+5.3 How the Copilot Decides What To Do
 
-The endpoint layers three mechanisms, evaluated in order:
+Not every message is handled the same way. Simple confirmations, cancellations, and questions about a concurrency conflict are answered directly and deterministically, using real system state — the LLM isn't involved in producing those answers at all, which keeps them fast and guaranteed accurate. Everything else is handled conversationally: the copilot is given access to its tools only when a message actually looks like it relates to table health or maintenance, and it can call a tool, read the result, and decide whether to call another or answer directly — within a bounded number of steps, so it always resolves to a final answer.
 
-1. **Deterministic interceptors** — bypass the LLM entirely for known, structured inputs:
-   - Confirmation/cancellation replies from the maintenance confirmation buttons (regex-matched exact strings sent by the frontend)
-   - OCC-conflict questions (keyword-matched: "occ", "concurrency", "conflict") — builds a fully data-driven explanation directly from log files, with no LLM involvement
-2. **`needs_tools` keyword gate** — only offers the LLM tool access (`tool_choice="auto"` vs `"none"`) if the message plausibly relates to tables/health/maintenance, preventing casual messages like "hello" from triggering unnecessary or incorrect tool calls
-3. **Bounded tool-calling loop** (max 5 iterations) — for genuinely open-ended questions, lets the model call tools, see results, and decide whether to call again or produce a final answer
+5.4 Human-in-the-Loop Maintenance Flow
 
-### 5.4 Human-in-the-Loop Maintenance Flow
-
-1. User asks to "clean up" a table (or a proactive alert fires) → agent calls `propose_maintenance` → frontend renders an explicit confirmation card with **Execute Compaction** / **Dismiss** buttons
-2. Only clicking **Execute Compaction** sends the exact confirmation string the backend's deterministic interceptor matches
-3. That interceptor — not the LLM — directly calls `execute_table_maintenance()` and then fetches real post-maintenance metrics, guaranteeing the maintenance action never runs without an explicit, unambiguous confirmation step, and is never fabricated or hallucinated
+Maintenance can be requested either by asking the copilot directly ("clean up the orders table") or by responding to a proactive alert. Either way, the copilot never performs the maintenance itself in that moment — it only proposes it, and the frontend presents an explicit confirmation card with Execute Compaction and Dismiss actions. Only an explicit tap on Execute Compaction triggers the actual compaction and snapshot expiration; the resulting response reports real post-maintenance health numbers, not a summary generated by the model. This guarantees the destructive action is always gated behind a genuine, unambiguous confirmation step.
 
 ### 5.5 Proactive Monitoring
 
-`APScheduler` runs `run_health_audit()` every minute, computing a real numeric health score from `get_table_metrics()` and comparing it against a fixed threshold — not an LLM's subjective judgment. If either table falls below the threshold, an alert is pushed over SSE to `/api/agent-notifications` and rendered in chat with the same confirmation-card flow. The audit is skipped entirely while `maintenance_in_progress["active"]` is `True`, preventing duplicate alerts from appearing mid-execution.
+`APScheduler` runs `run_health_audit()` every minute, computing a real numeric health score from `get_table_metrics()` and comparing it against a fixed threshold — not an LLM's subjective judgment. If either table falls below the threshold, an alert is pushed over SSE to `/api/agent-notifications` and rendered in chat with the same confirmation-card flow.
 
-### 5.6 OCC Conflict Simulation (`tests/test_iceberg_concurrency.py`)
+### 5.6 Optimistic Concurrency Control (OCC) Conflict Simulation
 
-Two concurrent Spark processes (`Worker A`, `Worker B`) both read the same Iceberg partition, then attempt to commit conflicting updates. Worker B commits first; Worker A's later commit is rejected by Iceberg's optimistic concurrency control, since its baseline snapshot no longer matches the table's current state. Real timestamps for the baseline read, the winning commit, and the crash are logged to `logs/simulation_history.log` and `logs/occ_error.log`, and used to build a fully accurate (non-fabricated) explanation in chat.
+This is a stretch-goal feature demonstrating what happens when two writers touch the same Iceberg partition at the same time, and how the agent can explain that failure afterward in plain language.
+
+### An isolated test table. 
+This simulation does not run against the orders or order_items fact tables used elsewhere in the project. It creates and uses its own dedicated Iceberg table (db.occ_test), rebuilt fresh on every run with a small set of partitioned baseline rows. This keeps the concurrency demonstration fully isolated from the pipeline and maintenance workflows, so triggering it never affects the fragmentation metrics or history shown on the main dashboard.
+
+### How it's run. 
+The simulation is triggered from the frontend's OCC tab, which calls the backend's /api/simulate-occ endpoint. This spins up the test table, then launches two Spark processes concurrently as separate OS processes: Worker A reads a partition to establish its snapshot baseline, then deliberately pauses to simulate real processing time before attempting to commit an update. Worker B reads the same partition but commits its own update almost immediately. Because Worker B commits first, the table advances to a new snapshot before Worker A gets a chance to commit — so when Worker A finally attempts its write, Iceberg detects that Worker A's baseline no longer matches the table's current state and rejects the commit. This is Iceberg's optimistic concurrency control working as intended: rather than silently overwriting Worker B's change, the conflicting commit is refused outright.
+
+### Live visualization. 
+ The OCCVisualizer component consumes this stream and displays the two workers' progress, the test table's state before and after, and the moment of conflict, in real time as it happens.
+
+### Explaining the conflict in chat. 
+Every meaningful event in the simulation — Worker A's baseline read, Worker B's successful commit, and Worker A's rejected commit — is logged with a real timestamp. Once a run has completed, asking the copilot something like "what is the OCC conflict that occurred?" produces an explanation built directly from those logged timestamps: the actual time elapsed between each event, the real error Iceberg raised, and a plain-language account of why the commit was rejected and what it means for data integrity. 
 
 ---
 
@@ -200,7 +204,7 @@ The dashboard connects to the MCP server via a single **persistent SSE client co
 ## 7. Running the Project
 
 1. Ensure Postgres is running and reachable via `DATABASE_URL` in `.env`.
-2. Run the one-time schema setup (`scripts/one_time_schema_setup.py`) to add `updated_at`/`created_at` columns and create the `pipeline_watermark` table, if not already applied.
+2. Run the one-time schema setup (`run_ddl_setup.py`) to add `updated_at`/`created_at` columns and create the `pipeline_watermark` table, if not already applied.
 3. Start the FastMCP tool server (port 8000).
 4. Start the FastAPI agent backend (`main.py`, port 8001) — requires `GROQ_API_KEY` in `.env`.
 5. Start the frontend (`npm run dev` in `frontend/`).
