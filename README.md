@@ -116,7 +116,9 @@ Under merge-on-read, every `MERGE` containing an update writes a small new **dat
 Two related but distinct components:
 
 - **`metrics.py` — `get_table_metrics()`**: an on-demand, live query against Iceberg's `.files`, `.snapshots`, `.manifests` metadata tables. Computes a weighted health score (70% fragmentation / 30% delete-bloat). Used by the chat agent and the MCP `get_table_health` tool for point-in-time answers.
-- **`history_logger.py` — `log_snapshot_with_session()`**: appends **one permanent row** to a per-table JSONL log (`warehouse/history/{table}_history.jsonl`) every time it's called — during each pipeline batch and again after maintenance. This is what powers the dashboard's trend chart. Critically, `files` here is computed as **data files + delete files combined**, not data files alone — this was a key bug fix (see Section 7).
+- **`history_logger.py` — `log_snapshot_with_session()`**: appends **one permanent row** to a per-table JSONL log (`warehouse/history/{table}_history.jsonl`) every time it's called — during each pipeline batch and again after maintenance. This is what powers the dashboard's trend chart, giving it a real, continuous timeline rather than a single before/after comparison.
+
+**Total Files metric.** The `files` value tracked here is deliberately computed as **data files + delete files combined**, not data files alone. This matters because both tables use merge-on-read: every `MERGE` containing an update writes a small new data file for the changed rows *and* a small delete file marking the old version as superseded, without rewriting the whole table. Since Iceberg always creates exactly one new snapshot per commit — regardless of how much data changed — but a single commit can contribute more than one new physical file whenever it includes updates, the "Total Files" line naturally climbs faster than the "Snapshots" line over time on the dashboard chart. This divergence is a real, textbook signature of merge-on-read delete-file bloat, and is exactly what the trend chart is designed to surface.
 
 ### 4.4 Maintenance (`src/maintenance/maintenance.py`)
 
@@ -130,7 +132,7 @@ A final health snapshot is logged immediately afterward, appended to the same hi
 
 ### 4.5 Shared Spark Session (`src/monitoring/spark_session.py`)
 
-All components (pipeline, maintenance, metrics, deep telemetry) share **one long-lived SparkSession** via `get_shared_spark()`. This was a deliberate fix: since the MCP server process stays alive across many tool calls, stopping Spark after each operation (`spark.stop()`) killed the shared JVM's SparkContext, breaking every subsequent run. The session is created once and never stopped for the life of the server process.
+All components (pipeline, maintenance, metrics, deep telemetry) share **one long-lived SparkSession** via `get_shared_spark()`, created once and reused for the life of the server process. This allows the 50-batch load, health checks, and maintenance to be triggered repeatedly and in any order, without needing to restart the backend between runs.
 
 ---
 
@@ -191,41 +193,11 @@ Two concurrent Spark processes (`Worker A`, `Worker B`) both read the same Icebe
 | `IcebergMetrics.tsx` | Deep telemetry view (raw snapshots/manifests/files) |
 | `OCCVisualizer.tsx` | Streams and displays the live OCC simulation |
 
-The dashboard connects to the MCP server via a single **persistent SSE client connection** (reused across all tool calls, including the 4-second status polling loop) rather than opening a new connection per call — this was a necessary fix after repeated connection churn caused silent failures during long-running pipeline triggers.
+The dashboard connects to the MCP server via a single **persistent SSE client connection**, reused across all tool calls — including the 4-second status polling loop used to detect when a triggered pipeline run has actually finished.
 
 ---
 
-## 7. Key Design Decisions & Bug Fixes
-
-A few non-obvious issues were identified and resolved during development, worth understanding:
-
-- **Postgres driver JVM caching**: different components originally specified inconsistent `spark.jars.packages` strings; since only the first `SparkSession.builder` call in a shared JVM actually takes effect, this caused intermittent `ClassNotFoundException` failures. Fixed by using one shared, consistently-configured session everywhere.
-- **Stale Iceberg catalog cache**: `spark.sql.catalog.local.cache-enabled` was left at its default (`true`), which could serve outdated table references after external changes (e.g., deleting the warehouse folder without restarting the server). Explicitly disabled.
-- **`asyncio.create_task` garbage collection**: background pipeline tasks launched without a retained reference could be silently garbage-collected mid-run. Fixed by storing tasks in a module-level set with a `done_callback`.
-- **Fabricated chart history**: `get_table_history` originally interpolated three fake data points from the *current* live state on every call, rather than reading real historical data — meaning maintenance replaced the "unhealthy" chart with a "healthy" one instead of showing both. Fixed by building `history_logger.py` to persist one real row per batch/event, never overwritten.
-- **Files vs. snapshots always equal (see Section 8 below for full explanation).**
-
----
-
-## 8. Why Files and Snapshots Were Always Equal — and What Fixed It
-
-Early in development, the fragmentation chart showed "Total Files" and "Snapshots" tracking almost perfectly 1:1, batch after batch. This had two independent causes:
-
-**Cause 1 — the metric itself was undercounting.** The chart's `files` value was computed as data files only (`content = 0` in Iceberg's `files` metadata table), completely excluding delete files (`content = 1`). Under merge-on-read, every `MERGE` containing an update produces a new delete file *in addition to* a new data file — but since only the data-file count was ever plotted, the chart was blind to roughly half of what each commit actually produced.
-
-**Cause 2 — batches were mechanically tiny and uniform.** Every batch touched only a handful of rows in a fixed shape (e.g., always "2 updates + 3 inserts"), so Spark naturally consolidated the output into a single small file rather than splitting it. Since every `MERGE` also always creates exactly one new snapshot (Iceberg's atomic commit unit, regardless of how much data changed), the result was mechanically 1 new file paired with 1 new snapshot, every single batch.
-
-Attempts to force file counts up artificially — `REPARTITION` SQL hints, `spark.sql.shuffle.partitions` — did **not** work, because Iceberg's `MERGE` write planner overrides session-level shuffle configuration for its own internal write stage.
-
-**What actually fixed it** was two genuine, non-forced changes working together:
-1. Switching the incremental source from Iceberg-self-reads to **real Postgres mutations with variable insert/update counts per batch** (Section 4.1) — batches are no longer a fixed, uniform shape.
-2. Correcting the history logger to report `files` as **data files + delete files combined**, matching what "total physical files" should actually mean.
-
-Since snapshots still always increase by exactly 1 per commit, but total files can now increase by more than 1 per commit whenever a batch contains updates (which generate both a new data file and a new delete file), the two lines now genuinely diverge — reflecting real merge-on-read delete-file bloat, a well-documented, textbook contributor to Iceberg table fragmentation, rather than an artifact of undercounting or artificially uniform batches.
-
----
-
-## 9. Running the Project
+## 7. Running the Project
 
 1. Ensure Postgres is running and reachable via `DATABASE_URL` in `.env`.
 2. Run the one-time schema setup (`scripts/one_time_schema_setup.py`) to add `updated_at`/`created_at` columns and create the `pipeline_watermark` table, if not already applied.
