@@ -4,6 +4,7 @@ import re
 import asyncio
 import subprocess
 import sys
+from datetime import datetime
 from fastapi.responses import StreamingResponse
 from fastapi import FastAPI, Request
 
@@ -244,7 +245,6 @@ async def chat_endpoint(request: ChatRequest):
             finally:
                 maintenance_in_progress["active"] = False
 
-            # Fetch real post-maintenance health directly -- no LLM guessing involved
             health_reports = []
             for t in tables:
                 metrics = await run_in_threadpool(get_table_metrics, t)
@@ -260,6 +260,66 @@ async def chat_endpoint(request: ChatRequest):
 
         if cancel_match:
             return {"reply": f"Understood — maintenance on {cancel_match.group(1)} has been cancelled. No changes were made."}
+
+        # --- DETERMINISTIC OCC INTERCEPTOR ---
+        occ_keywords = ["occ", "concurrency", "conflict"]
+        if any(kw in request.message.lower() for kw in occ_keywords):
+            history_path = BASE_DIR / "logs" / "simulation_history.log"
+            error_path = BASE_DIR / "logs" / "occ_error.log"
+
+            baseline_time = None
+            commit_time = None
+
+            if history_path.exists():
+                with open(history_path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or " " not in line:
+                            continue
+                        ts_str, msg = line.split(" ", 1)
+                        if "Reading partition to establish snapshot baseline" in msg and baseline_time is None:
+                            baseline_time = ts_str
+                        if "COMMIT SUCCESS" in msg and commit_time is None:
+                            commit_time = ts_str
+
+            crash_time = None
+            if error_path.exists():
+                with open(error_path, "r") as f:
+                    for line in f:
+                        if "CRASH TIMESTAMP:" in line:
+                            crash_time = line.split("CRASH TIMESTAMP:")[1].strip()
+                            break
+
+            if baseline_time and commit_time and crash_time:
+                fmt = "%H:%M:%S.%f"
+                t_base = datetime.strptime(baseline_time, fmt)
+                t_commit = datetime.strptime(commit_time, fmt)
+                t_crash = datetime.strptime(crash_time, fmt)
+
+                baseline_to_crash = (t_crash - t_base).total_seconds()
+                commit_to_crash = (t_crash - t_commit).total_seconds()
+
+                reply = (
+                    "**1. TIMELINE:**\n"
+                    f"- `{baseline_time}` — Worker A read the ELECTRONICS partition, establishing its snapshot baseline.\n"
+                    f"- `{commit_time}` — Worker B committed its update to the same partition first, advancing the table's snapshot.\n"
+                    f"- `{crash_time}` — Worker A attempted to commit its own update, {baseline_to_crash:.2f}s after its baseline read "
+                    f"and {commit_to_crash:.2f}s after Worker B's commit. The commit was rejected.\n\n"
+                    "**2. ROOT CAUSE:**\n"
+                    "Worker A was still operating on the table state it read at its baseline timestamp. By the time it tried to "
+                    "commit, Worker B had already advanced the table to a new snapshot. Iceberg's Optimistic Concurrency Control "
+                    "detected that Worker A's base snapshot no longer matched the table's current snapshot and rejected the write "
+                    "to prevent silently overwriting Worker B's change.\n\n"
+                    "**3. SYSTEM IMPACT:**\n"
+                    "- Data Integrity: Preserved — no corrupted data or lost updates\n"
+                    "- Worker A Status: Failed — commit aborted\n"
+                    "- Worker B Status: Succeeded — its update is the one reflected in the table\n"
+                    "- Storage State: Worker A's partial data files are now orphaned and will be cleaned up by the next maintenance/compaction run"
+                )
+            else:
+                reply = "I couldn't find a complete OCC conflict record. Please run the OCC simulation first, then ask again."
+
+            return {"reply": reply}
         
         messages = [
             {
@@ -282,6 +342,9 @@ async def chat_endpoint(request: ChatRequest):
             {"role": "user", "content": request.message}
         ]
 
+        maintenance_keywords = ["health", "clean", "maintain", "maintenance", "compact", "optimize", "fragmented", "orders", "order_items", "table"]
+        needs_tools = any(kw in request.message.lower() for kw in maintenance_keywords)
+
         max_iterations = 5
         for _ in range(max_iterations):
             response = await run_in_threadpool(
@@ -289,7 +352,7 @@ async def chat_endpoint(request: ChatRequest):
                 model="llama-3.3-70b-versatile",
                 messages=messages,
                 tools=agent_tools,
-                tool_choice="auto"
+                tool_choice="auto" if needs_tools else "none"
             )
 
             response_message = response.choices[0].message
@@ -305,9 +368,9 @@ async def chat_endpoint(request: ChatRequest):
                 tool_call = response_message.tool_calls[0]
                 function_name = tool_call.function.name
                 function_args = json.loads(tool_call.function.arguments)
-                ool_call_id = tool_call.id
+                tool_call_id = tool_call.id
                 messages.append(response_message.model_dump(exclude_none=True))   # <-- was: messages.append(response_message)
-            
+
             elif "<function=" in content_text:
                 match = re.search(r'<function=(\w+)(.*?)(?:</function>|>)?', content_text)
                 if match:
@@ -318,6 +381,8 @@ async def chat_endpoint(request: ChatRequest):
                     except:
                         function_args = {}
                     messages.append({"role": "assistant", "content": content_text})
+
+            print(f"[Chat Loop] tool_call={has_tool_call}, function={function_name}, args={function_args}")
 
             if not has_tool_call:
                 # Model gave a plain final answer -- we're done
