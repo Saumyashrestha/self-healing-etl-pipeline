@@ -316,10 +316,19 @@ async def chat_endpoint(request: ChatRequest):
                     "- Worker B Status: Succeeded — its update is the one reflected in the table\n"
                     "- Storage State: Worker A's partial data files are now orphaned and will be cleaned up by the next maintenance/compaction run"
                 )
+
+                return {
+                    "reply": reply,
+                    "show_occ_diagram": True,
+                    "occ_timeline": {
+                        "baseline_time": baseline_time,
+                        "commit_time": commit_time,
+                        "crash_time": crash_time
+                    }
+                }
             else:
                 reply = "I couldn't find a complete OCC conflict record. Please run the OCC simulation first, then ask again."
-
-            return {"reply": reply}
+                return {"reply": reply}
         
         messages = [
             {

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
+import OCCDiagram from './OCCDiagram';
 
 interface Message {
   role: 'user' | 'agent' | 'system';
@@ -7,6 +8,8 @@ interface Message {
   requires_confirmation?: boolean;
   target_table?: string;
   resolved?: boolean;
+  show_occ_diagram?: boolean;
+  occ_timeline?: { baseline_time: string; commit_time: string; crash_time: string };
 }
 
 export default function AICopilot() {
@@ -23,15 +26,14 @@ export default function AICopilot() {
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: 'agent',
-            content: `🚨 **Proactive Alert:**\n\n${data.content}`,
-            requires_confirmation: data.requires_confirmation,
-            target_table: data.target_table
-          }
-        ]);
+        setMessages(prev => [...prev, {
+          role: 'agent',
+          content: data.reply,
+          requires_confirmation: data.requires_confirmation,
+          target_table: data.target_table,
+          show_occ_diagram: data.show_occ_diagram,
+          occ_timeline: data.occ_timeline
+        }]);
       } catch (err) {
         console.error("Failed to parse agent notification", err);
       }
@@ -58,7 +60,9 @@ export default function AICopilot() {
         role: 'agent',
         content: data.reply,
         requires_confirmation: data.requires_confirmation,
-        target_table: data.target_table
+        target_table: data.target_table,
+        show_occ_diagram: data.show_occ_diagram,
+        occ_timeline: data.occ_timeline
       }]);
     } catch (error) {
       setMessages(prev => [...prev, { role: 'agent', content: `Error connecting to backend.` }]);
@@ -86,7 +90,7 @@ export default function AICopilot() {
   }, [messages]);
 
   return (
-    <div className="flex flex-col h-full bg-[#0f172a] rounded-xl overflow-hidden shadow-2xl border border-slate-700 font-sans">
+    <div className="flex flex-col h-[85vh] bg-[#0f172a] rounded-xl overflow-hidden shadow-2xl border border-slate-700 font-sans">
       {/* Header */}
       <div className="bg-slate-800/80 backdrop-blur-sm p-4 border-b border-slate-700 flex justify-between items-center shadow-sm z-10">
         <div className="flex items-center gap-3">
@@ -101,11 +105,10 @@ export default function AICopilot() {
         {messages.map((m, i) => (
           <div key={i} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
             <div
-              className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed shadow-md prose prose-invert prose-sm max-w-none ${
-                m.role === 'user'
+              className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed shadow-md prose prose-invert prose-sm max-w-none ${m.role === 'user'
                   ? 'bg-blue-600 text-white rounded-br-none'
                   : 'bg-slate-800 text-slate-200 border border-slate-700 rounded-bl-none'
-              }`}
+                }`}
             >
               <ReactMarkdown>{m.content}</ReactMarkdown>
             </div>
@@ -135,6 +138,16 @@ export default function AICopilot() {
                 </div>
               </div>
             )}
+
+            {/* OCC Diagram */}
+            {m.show_occ_diagram && m.occ_timeline && (
+              <OCCDiagram
+                baselineTime={m.occ_timeline.baseline_time}
+                commitTime={m.occ_timeline.commit_time}
+                crashTime={m.occ_timeline.crash_time}
+              />
+            )}
+
           </div>
         ))}
       </div>
