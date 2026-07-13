@@ -166,16 +166,16 @@ export default function Dashboard({ setActiveTab }: { setActiveTab: (tab: string
     const deleteStorageMB = (delFiles * delAvgSize) / 1024;
     const totalStorageMB = (dataStorageMB + deleteStorageMB).toFixed(2);
     const bloatRatio = parseFloat(totalStorageMB) > 0 ? ((deleteStorageMB / parseFloat(totalStorageMB)) * 100).toFixed(0) : 0;
-    const totalParquet = audit.after.files;
-    const healthScore = audit.after.health_score || 0;
-    const healthColor = healthScore > 65 ? 'text-emerald-500' : healthScore > 40 ? 'text-amber-500' : 'text-red-500';
+    const totalParquet = audit.after.files + delFiles;
+    // const healthScore = audit.after.health_score || 0;
+    // const healthColor = healthScore > 65 ? 'text-emerald-500' : healthScore > 40 ? 'text-amber-500' : 'text-red-500';
 
     return (
       // TIGHTENED UI: p-6, rounded-xl, smaller text sizing
       <div className="bg-white p-6 rounded-xl border shadow-sm flex flex-col gap-5 w-full">
         <div className="flex justify-between items-center border-b border-slate-100 pb-3">
           <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">{title}</h3>
-          <div className={`text-xl font-black ${healthColor}`}>{healthScore}% Health</div>
+          {/* <div className={`text-xl font-black ${healthColor}`}>{healthScore}% Health</div> */}
         </div>
 
         <div className="grid grid-cols-2 gap-4 mb-2">

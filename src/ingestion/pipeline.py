@@ -69,8 +69,10 @@ def mutate_postgres(pg_conn, insert_count, update_count, customer_ids, product_i
     # --- Updates: advance some existing Pending orders to Shipped ---
     if update_count > 0:
         cur.execute("""
-            SELECT order_id FROM orders WHERE status = 'Pending' ORDER BY random() LIMIT %s
-        """, (update_count,))
+    SELECT order_id FROM orders 
+    WHERE status = 'Pending' AND order_date < NOW() - INTERVAL '1 day'
+    ORDER BY random() LIMIT %s
+""", (update_count,))
         ids_to_update = [r[0] for r in cur.fetchall()]
         for oid in ids_to_update:
             cur.execute("""

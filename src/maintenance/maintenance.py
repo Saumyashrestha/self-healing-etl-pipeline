@@ -57,6 +57,9 @@ def execute_table_maintenance(table_name: str) -> str:
     spark.sparkContext.setLogLevel("ERROR")
 
     try:
+        # Force single-partition output so tiny compacted data lands in exactly 1 file
+        spark.conf.set("spark.sql.shuffle.partitions", "1")
+        
         # 1. Compaction (Data Files)
         spark.sql(f"CALL local.system.rewrite_data_files(table => 'local.db.{table_name}')")
         
