@@ -346,13 +346,13 @@ async def chat_endpoint(request: ChatRequest):
         needs_tools = any(kw in request.message.lower() for kw in maintenance_keywords)
 
         max_iterations = 5
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
             response = await run_in_threadpool(
                 client.chat.completions.create,
                 model="llama-3.3-70b-versatile",
                 messages=messages,
                 tools=agent_tools,
-                tool_choice="auto" if needs_tools else "none"
+                tool_choice="auto" if (needs_tools and iteration == 0) else "none"
             )
 
             response_message = response.choices[0].message
@@ -409,6 +409,7 @@ async def chat_endpoint(request: ChatRequest):
                     tool_result = " \n ".join(reports)
                 except Exception as e:
                     tool_result = f"Error: {str(e)}"
+                return {"reply": tool_result}
 
             elif function_name == "execute_confirmed_maintenance":
                 raw_names = function_args.get("table_names", function_args.get("table_name", ""))

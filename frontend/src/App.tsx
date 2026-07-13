@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import Dashboard from './components/Dashboard';
-import IcebergMetrics from './components/IcebergMetrics';
+// import IcebergMetrics from './components/IcebergMetrics';
 import AICopilot from './components/AICopilot';
 import OCCVisualizer from './components/OCCVisualizer';
 
@@ -15,7 +15,7 @@ function App() {
             <h1 className="font-bold text-lg tracking-tight">Lakehouse Copilot</h1>
           </div>
           <nav className="space-y-1.5">
-            {['Dashboard', 'Iceberg Metrics', 'AI Copilot', 'OCC Simulation'].map((item) => (
+            {['Dashboard', 'AI Copilot', 'OCC Simulation'].map((item) => (
               <button 
                 key={item}
                 onClick={() => setActiveTab(item.toLowerCase().replace(' ', '-'))}
@@ -36,9 +36,9 @@ function App() {
           <Dashboard setActiveTab={setActiveTab} />
         </div>
         
-        <div className={activeTab === 'iceberg-metrics' ? 'block' : 'hidden'}>
+        {/* <div className={activeTab === 'iceberg-metrics' ? 'block' : 'hidden'}>
           <IcebergMetrics />
-        </div>
+        </div> */}
         
         <div className={activeTab === 'ai-copilot' ? 'block' : 'hidden'}>
           <AICopilot />
