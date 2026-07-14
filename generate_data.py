@@ -6,6 +6,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 from faker import Faker
 from dotenv import load_dotenv
+from src.utils.catalog import pick_customer_id, pick_product_id, get_product_price, generate_status
 
 # Load the database credentials
 load_dotenv()
@@ -17,37 +18,31 @@ def generate_order_logic(order_id, is_recent=False):
     Core business logic for generating a realistic order.
     If is_recent is True, it forces the order to be within the last 3 days.
     """
-    customer_id = random.randint(100, 999)
-    
-    # 1. Date Generation
+    customer_id = pick_customer_id()          # CHANGED: was random.randint(100, 999)
+
+    # 1. Date Generation (unchanged)
     if is_recent:
         days_ago = random.randint(0, 3)
     else:
         days_ago = random.randint(0, 365)
-        
+
     order_date = datetime.now() - timedelta(days=days_ago, hours=random.randint(0, 23))
-    
-    # 2. Status Generation (The Anomaly Fix)
-    if days_ago > 5:
-        status = 'Completed'
-    elif days_ago > 2:
-        status = 'Shipped'
-    else:
-        status = 'Pending'
-        
+
+    # 2. Status Generation
+    status = generate_status(days_ago)          
+
     # 3. Item Generation
     num_items = random.randint(1, 5)
     order_total = 0
     items = []
-    
+
     for _ in range(num_items):
-        product_id = random.randint(1, 50)
-        price = round(random.uniform(10.0, 150.0), 2)
+        product_id = pick_product_id()           
+        price = get_product_price(product_id)     
         order_total += price
         items.append((order_id, product_id, price))
-        
+
     order = (order_id, customer_id, order_date, round(order_total, 2), status)
-    
     return order, items
 
 def seed_database(num_orders=10000):

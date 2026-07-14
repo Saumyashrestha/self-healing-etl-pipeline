@@ -6,6 +6,7 @@ from pyspark.sql import SparkSession
 from dotenv import load_dotenv
 from src.monitoring.history_logger import log_snapshot_with_session
 from src.monitoring.spark_session import get_shared_spark
+from src.utils.catalog import pick_product_id, get_product_price
 
 # Load credentials
 load_dotenv()
@@ -83,21 +84,26 @@ def mutate_postgres(pg_conn, insert_count, update_count, customer_ids, product_i
     for _ in range(insert_count):
         id_counters["order_id"] += 1
         new_order_id = id_counters["order_id"]
-        customer_id = random.choice(customer_ids)
-        amount = round(random.uniform(10.0, 500.0), 2)
+        customer_id = random.choice(customer_ids)   # unchanged - see note below
+        # amount is now the SUM of real item prices, computed after the items loop
+        order_items_for_this_order = []
+
+        num_items = random.randint(1, 3)
+        for _ in range(num_items):
+            id_counters["item_id"] += 1
+            new_item_id = id_counters["item_id"]
+            product_id = pick_product_id()              # CHANGED: was random.choice(product_ids)
+            price = get_product_price(product_id)        # CHANGED: was random.uniform(5.0, 200.0)
+            order_items_for_this_order.append((new_item_id, product_id, price))
+
+        amount = round(sum(p for _, _, p in order_items_for_this_order), 2)  # CHANGED
 
         cur.execute("""
             INSERT INTO orders (order_id, customer_id, order_date, amount, status, updated_at)
             VALUES (%s, %s, CURRENT_DATE, %s, 'Pending', NOW())
         """, (new_order_id, customer_id, amount))
 
-        num_items = random.randint(1, 3)
-        for _ in range(num_items):
-            id_counters["item_id"] += 1
-            new_item_id = id_counters["item_id"]
-            product_id = random.choice(product_ids)
-            price = round(random.uniform(5.0, 200.0), 2)
-
+        for new_item_id, product_id, price in order_items_for_this_order:
             cur.execute("""
                 INSERT INTO order_items (item_id, order_id, product_id, price, created_at)
                 VALUES (%s, %s, %s, %s, NOW())

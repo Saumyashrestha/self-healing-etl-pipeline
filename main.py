@@ -7,6 +7,7 @@ import sys
 from datetime import datetime
 from fastapi.responses import StreamingResponse
 from fastapi import FastAPI, Request
+from mcp_client import call_mcp_tool
 
 from pathlib import Path
 from fastapi import FastAPI
@@ -16,8 +17,6 @@ from dotenv import load_dotenv
 from fastapi.concurrency import run_in_threadpool
 
 from groq import Groq
-from src.monitoring.metrics import get_table_metrics
-from src.maintenance.maintenance import execute_table_maintenance
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -102,8 +101,7 @@ async def run_health_audit():
         print("[Agent Monitor] Skipping health audit — maintenance currently in progress.")
         return
     try:
-        orders_metrics = await run_in_threadpool(get_table_metrics, "orders")
-        items_metrics = await run_in_threadpool(get_table_metrics, "order_items")
+        combined_metrics = await call_mcp_tool("get_table_health", {"table_names": "orders,order_items"})
         
         messages = [
             {
@@ -118,7 +116,7 @@ async def run_health_audit():
             },
             {
                 "role": "user", 
-                "content": f"Orders Table Metrics: {orders_metrics}\nOrder Items Table Metrics: {items_metrics}"
+                "content": f"Combined Table Metrics: {combined_metrics}"
             }
         ]
         
@@ -234,27 +232,20 @@ async def chat_endpoint(request: ChatRequest):
 
         if confirm_match:
             raw_names = confirm_match.group(1)
-            tables = [t.strip() for t in raw_names.split(',')]
 
             maintenance_in_progress["active"] = True
             try:
-                maintenance_results = []
-                for t in tables:
-                    res = await run_in_threadpool(execute_table_maintenance, t)
-                    maintenance_results.append(res)
+                maintenance_result = await call_mcp_tool("execute_confirmed_maintenance", {"table_names": raw_names})
             finally:
                 maintenance_in_progress["active"] = False
 
-            health_reports = []
-            for t in tables:
-                metrics = await run_in_threadpool(get_table_metrics, t)
-                health_reports.append(f"[{t.upper()}]: {metrics}")
+            health_report = await call_mcp_tool("get_table_health", {"table_names": raw_names})
 
             reply = (
                 "✅ **Maintenance complete.**\n\n"
-                + "\n".join(maintenance_results)
+                + maintenance_result
                 + "\n\n**Post-Maintenance Health:**\n"
-                + "\n".join(health_reports)
+                + health_report
             )
             return {"reply": reply}
 
@@ -410,26 +401,16 @@ async def chat_endpoint(request: ChatRequest):
             if function_name == "get_table_health":
                 try:
                     raw_names = function_args.get("table_names", function_args.get("table_name", ""))
-                    tables = [t.strip() for t in raw_names.split(',')]
-                    reports = []
-                    for t in tables:
-                        metrics = await run_in_threadpool(get_table_metrics, t)
-                        reports.append(f"[{t.upper()}]: {metrics}")
-                    tool_result = " \n ".join(reports)
+                    tool_result = await call_mcp_tool("get_table_health", {"table_names": raw_names})
                 except Exception as e:
                     tool_result = f"Error: {str(e)}"
                 return {"reply": tool_result}
 
             elif function_name == "execute_confirmed_maintenance":
                 raw_names = function_args.get("table_names", function_args.get("table_name", ""))
-                tables = [t.strip() for t in raw_names.split(',')]
                 maintenance_in_progress["active"] = True
                 try:
-                    results = []
-                    for t in tables:
-                        res = await run_in_threadpool(execute_table_maintenance, t)
-                        results.append(res)
-                    tool_result = " \n ".join(results)
+                    tool_result = await call_mcp_tool("execute_confirmed_maintenance", {"table_names": raw_names})
                 finally:
                     maintenance_in_progress["active"] = False
 
