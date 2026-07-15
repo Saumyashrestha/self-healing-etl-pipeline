@@ -245,8 +245,15 @@ def run_pipeline(log_queue=None):
 
         emit_log("Pipeline complete. The tables are successfully loaded and degraded.")
 
+    # except Exception as e:
+    #     emit_log(f"CRITICAL ERROR: {str(e)}")
+
     except Exception as e:
-        emit_log(f"CRITICAL ERROR: {str(e)}")
+        import traceback
+        tb = traceback.format_exc()
+        emit_log(f"CRITICAL ERROR: {type(e).__name__}")
+        print(tb[-3000:])  # print last few thousand chars of the traceback to terminal
+    
     finally:
         if pg_conn:
             pg_conn.close()

@@ -20,7 +20,7 @@ def register_tools(mcp: FastMCP):
 
     @mcp.tool()
     async def propose_maintenance(table_names: str) -> str:
-        return f"PROPOSAL: Ready to run compaction and vacuum on '{table_names}'."
+        return f"I am ready to run a full compaction and vacuum cycle on: **{table_names}**. This is a destructive storage operation."
 
     @mcp.tool()
     async def execute_confirmed_maintenance(table_names: str) -> str:

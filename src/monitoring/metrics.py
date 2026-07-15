@@ -14,6 +14,18 @@ def get_spark_session():
     spark.sparkContext.setLogLevel("ERROR")
     return spark
 
+def calculate_health_score(data_files: int, data_file_avg_kb: float, delete_files: int, delete_file_avg_kb: float) -> int:
+    """Single source of truth for health scoring. 70% fragmentation weight,
+    30% delete-bloat weight. Used by both the live chat tool and the
+    dashboard trend-history logger, so the two never disagree."""
+    fragmentation_score = 100 if data_files <= 5 else max(0, 100 - (data_files * 2))
+
+    total_size = (data_files * data_file_avg_kb) + (delete_files * delete_file_avg_kb)
+    bloat_ratio = (delete_files * delete_file_avg_kb) / total_size if total_size > 0 else 0
+    bloat_score = 100 - (bloat_ratio * 100)
+
+    return int((fragmentation_score * 0.70) + (bloat_score * 0.30))
+
 def get_table_metrics(table_name: str) -> str:
     """
     Called by the AI Agent to check the health of a specific table.
@@ -53,14 +65,8 @@ def get_table_metrics(table_name: str) -> str:
                 delete_files = row['file_count']
                 delete_file_avg_kb = row['avg_size_kb']
 
-        # Dynamic Health Math (70% fragmentation, 30% bloat)
-        fragmentation_score = 100 if data_files <= 5 else max(0, 100 - (data_files * 2))
-        
-        total_size = (data_files * data_file_avg_kb) + (delete_files * delete_file_avg_kb)
-        bloat_ratio = (delete_files * delete_file_avg_kb) / total_size if total_size > 0 else 0
-        bloat_score = 100 - (bloat_ratio * 100)
-        
-        health_score = int((fragmentation_score * 0.70) + (bloat_score * 0.30))
+        # Health score computed via the single shared function (also used by history_logger.py)
+        health_score = calculate_health_score(data_files, data_file_avg_kb, delete_files, delete_file_avg_kb)
 
         return (
             f"Health Score: {health_score}%. "
@@ -72,7 +78,7 @@ def get_table_metrics(table_name: str) -> str:
         
     except Exception as e:
         return f"Error retrieving metrics for {table_name}. Ensure the table exists. Error: {str(e)}"
-
+    
 def capture_metrics(phase_label):
     """
     Legacy CLI logger for writing metrics to a text file.

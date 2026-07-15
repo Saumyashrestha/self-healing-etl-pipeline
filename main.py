@@ -106,6 +106,9 @@ agent_message_clients = []
 maintenance_in_progress = {"active": False}
 
 async def run_health_audit():
+    """Computes a real numeric health score and compares it to a fixed
+    threshold. The LLM is only used afterward, to phrase the alert message —
+    never to decide whether one is needed."""
     if maintenance_in_progress["active"]:
         print("[Agent Monitor] Skipping health audit — maintenance currently in progress.")
         return
@@ -113,46 +116,52 @@ async def run_health_audit():
     if await is_pipeline_running():
         print("[Agent Monitor] Skipping health audit — pipeline load currently in progress.")
         return
+
     try:
         combined_metrics = await call_mcp_tool("get_table_health", {"table_names": "orders,order_items"})
-        
+
+        HEALTH_THRESHOLD = 70
+
+        scores = [int(s) for s in re.findall(r"Health Score:\s*(\d+)%", combined_metrics)]
+        if not scores:
+            print("[Agent Monitor] Could not parse health score(s); skipping audit.")
+            return
+
+        worst_score = min(scores)
+        print(f"[Agent Monitor] Parsed scores: {scores} | threshold={HEALTH_THRESHOLD}")
+
+        if worst_score >= HEALTH_THRESHOLD:
+            return  # genuinely healthy — no alert, no LLM call needed
+
         messages = [
             {
                 "role": "system",
                 "content": (
                     "You are a proactive monitoring agent for an Apache Iceberg database. "
-                    "Review the provided metrics for BOTH the 'orders' and 'order_items' tables. "
-                    "If EITHER table is highly fragmented (e.g., too many small data files, large delete bloat), "
-                    "output a SHORT, urgent 1-2 sentence warning suggesting compaction. "
-                    "If BOTH tables are reasonably healthy, output EXACTLY the word: HEALTHY."
+                    "A table has ALREADY been confirmed unhealthy by a numeric health check. "
+                    "Write a short, urgent 1-2 sentence warning recommending compaction, "
+                    "referencing the specific metrics provided."
                 )
             },
-            {
-                "role": "user", 
-                "content": f"Combined Table Metrics: {combined_metrics}"
-            }
+            {"role": "user", "content": f"Combined Table Metrics: {combined_metrics}"}
         ]
-        
+
         response = await run_in_threadpool(
             client.chat.completions.create,
             model="llama-3.3-70b-versatile",
             messages=messages
         )
-        
         evaluation = response.choices[0].message.content.strip()
-        print(f"[Agent Monitor] LLM thought: {evaluation}")
-        
-        if "HEALTHY" not in evaluation.upper():
-            # 3. Target BOTH tables in the UI button payload
-            alert_payload = json.dumps({
-                "content": evaluation,
-                "requires_confirmation": True,
-                "target_table": "orders, order_items"  # <-- Fix is here
-            })
-            
-            for client_queue in agent_message_clients:
-                await client_queue.put(alert_payload)
-                
+
+        alert_payload = json.dumps({
+            "content": evaluation,
+            "requires_confirmation": True,
+            "target_table": "orders, order_items"
+        })
+
+        for client_queue in agent_message_clients:
+            await client_queue.put(alert_payload)
+
     except Exception as e:
         print(f"[Agent Monitor] Error: {e}")
 
@@ -405,10 +414,17 @@ async def chat_endpoint(request: ChatRequest):
                 return {"reply": content_text if content_text else "How can I assist you?"}
 
             # --- INTERCEPTOR: The HITL Guard ---
+            # --- INTERCEPTOR: The HITL Guard ---
             if function_name == "propose_maintenance":
                 target = function_args.get("table_names", function_args.get("table_name", "all tables"))
+                try:
+                    proposal_text = await call_mcp_tool("propose_maintenance", {"table_names": target})
+                except Exception as e:
+                    proposal_text = f"I am ready to run a full compaction and vacuum cycle on: **{target}**. This is a destructive storage operation."
+                    print(f"[propose_maintenance] MCP call failed, using fallback text: {e}")
+
                 return {
-                    "reply": f"I am ready to run a full compaction and vacuum cycle on: **{target}**. This is a destructive storage operation.",
+                    "reply": proposal_text,
                     "requires_confirmation": True,
                     "target_table": target
                 }

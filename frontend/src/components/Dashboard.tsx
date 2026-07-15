@@ -6,6 +6,7 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 interface HistoryData {
   batch: number;
   files: number;
+  data_files: number | undefined;
   snapshots: number;
   avg_file_size_kb: number;
   manifests: number;
@@ -18,6 +19,7 @@ interface HistoryData {
 
 interface AuditShape {
   files: number;
+  data_files: number | undefined;
   snapshots: number;
   avg_file_size_kb: number;
   manifests: number;
@@ -27,8 +29,8 @@ interface AuditShape {
 }
 
 const defaultAudit: { before: AuditShape; after: AuditShape } = {
-  before: { files: 0, snapshots: 0, avg_file_size_kb: 0, manifests: 0, delete_files: 0, delete_file_avg_kb: 0, health_score: 100 },
-  after: { files: 0, snapshots: 0, avg_file_size_kb: 0, manifests: 0, delete_files: 0, delete_file_avg_kb: 0, health_score: 100 }
+  before: { files: 0, data_files: 0, snapshots: 0, avg_file_size_kb: 0, manifests: 0, delete_files: 0, delete_file_avg_kb: 0, health_score: 100 },
+  after: { files: 0, data_files: 0, snapshots: 0, avg_file_size_kb: 0, manifests: 0, delete_files: 0, delete_file_avg_kb: 0, health_score: 100 }
 };
 
 export default function Dashboard({ setActiveTab }: { setActiveTab: (tab: string) => void }) {
@@ -162,11 +164,12 @@ export default function Dashboard({ setActiveTab }: { setActiveTab: (tab: string
   const renderTableMetrics = (title: string, audit: typeof defaultAudit) => {
     const delFiles = audit.after.delete_files || 0;
     const delAvgSize = audit.after.delete_file_avg_kb || 0;
-    const dataStorageMB = (audit.after.files * audit.after.avg_file_size_kb) / 1024;
+    const dataFilesCount = audit.after.data_files ?? 0;   // pure data-file count, not combined
+    const dataStorageMB = (dataFilesCount * audit.after.avg_file_size_kb) / 1024;
     const deleteStorageMB = (delFiles * delAvgSize) / 1024;
     const totalStorageMB = (dataStorageMB + deleteStorageMB).toFixed(2);
     const bloatRatio = parseFloat(totalStorageMB) > 0 ? ((deleteStorageMB / parseFloat(totalStorageMB)) * 100).toFixed(0) : 0;
-    const totalParquet = audit.after.files + delFiles;
+    const totalParquet = audit.after.files;   // audit.after.files is ALREADY the combined total from history_logger.py
     // const healthScore = audit.after.health_score || 0;
     // const healthColor = healthScore > 65 ? 'text-emerald-500' : healthScore > 40 ? 'text-amber-500' : 'text-red-500';
 
@@ -187,12 +190,12 @@ export default function Dashboard({ setActiveTab }: { setActiveTab: (tab: string
           <div className="bg-slate-50 p-4 rounded-lg border border-slate-100">
             <h4 className="text-xs font-semibold text-slate-500 mb-1">Total Parquet Files</h4>
             <p className="text-3xl font-bold text-slate-800">{totalParquet}</p>
-            {audit.after.files > 5 ? <p className="text-xs text-red-500 mt-1 font-medium">Needs Compaction</p> : <p className="text-xs text-emerald-500 mt-1 font-medium">Optimized</p>}
+            {dataFilesCount > 5 ? <p className="text-xs text-red-500 mt-1 font-medium">Needs Compaction</p> : <p className="text-xs text-emerald-500 mt-1 font-medium">Optimized</p>}
           </div>
         </div>
 
         <div className="grid grid-cols-4 gap-4 mt-1">
-          <div><h4 className="text-xs font-semibold text-slate-500 mb-1">Data Files</h4><p className="text-xl font-bold text-slate-700">{audit.after.files}</p><p className="text-[10px] text-slate-400 mt-0.5">{dataStorageMB.toFixed(2)} MB</p></div>
+          <div><h4 className="text-xs font-semibold text-slate-500 mb-1">Data Files</h4><p className="text-xl font-bold text-slate-700">{dataFilesCount}</p><p className="text-[10px] text-slate-400 mt-0.5">{dataStorageMB.toFixed(2)} MB</p></div>
           <div><h4 className="text-xs font-semibold text-slate-500 mb-1">Delete Files</h4><p className="text-xl font-bold text-slate-700">{delFiles}</p><p className="text-[10px] text-slate-400 mt-0.5">{deleteStorageMB.toFixed(2)} MB</p></div>
           <div><h4 className="text-xs font-semibold text-slate-500 mb-1">Snapshots</h4><p className="text-xl font-bold text-slate-700">{audit.after.snapshots}</p></div>
           <div><h4 className="text-xs font-semibold text-slate-500 mb-1">Manifests</h4><p className="text-xl font-bold text-slate-700">{audit.after.manifests}</p></div>
@@ -281,8 +284,8 @@ export default function Dashboard({ setActiveTab }: { setActiveTab: (tab: string
             {selectedTable === 'orders' ? (
               <div>
                 <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-4">Orders Table</p>
-                <div className="flex justify-between text-sm mb-3"><span className="text-slate-500">Peak Bloat (Files):</span> <span className="font-mono text-red-500 font-medium text-lg">{ordersAudit.before.files + (ordersAudit.before.delete_files || 0)}</span></div>
-                <div className="flex justify-between text-sm"><span className="text-slate-500">Current State:</span> <span className="font-mono text-emerald-500 font-medium text-lg">{ordersAudit.after.files + (ordersAudit.after.delete_files || 0)}</span></div>
+                <div className="flex justify-between text-sm mb-3"><span className="text-slate-500">Peak Bloat (Files):</span> <span className="font-mono text-red-500 font-medium text-lg">{ordersAudit.before.files}</span></div>
+                <div className="flex justify-between text-sm"><span className="text-slate-500">Current State:</span> <span className="font-mono text-emerald-500 font-medium text-lg">{ordersAudit.after.files}</span></div>
               </div>
             ) : (
               <div>
