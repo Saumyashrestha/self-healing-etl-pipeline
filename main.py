@@ -89,6 +89,16 @@ agent_tools = [
     }
 ]
 
+async def is_pipeline_running() -> bool:
+    """Asks Server A (the real toolbox) whether the 50-batch load is currently running."""
+    try:
+        status_str = await call_mcp_tool("get_pipeline_status", {})
+        status = json.loads(status_str)
+        return status.get("running", False)
+    except Exception as e:
+        print(f"[Pipeline Check] Error checking pipeline status: {e}")
+        return False
+
 # --- PROACTIVE AGENT STATE ---
 agent_message_queue = asyncio.Queue()
 
@@ -96,9 +106,12 @@ agent_message_clients = []
 maintenance_in_progress = {"active": False}
 
 async def run_health_audit():
-    """Silently fetches metrics and asks the LLM if a warning is needed."""
-    if maintenance_in_progress["active"]:   # <-- ADD THIS
+    if maintenance_in_progress["active"]:
         print("[Agent Monitor] Skipping health audit — maintenance currently in progress.")
+        return
+
+    if await is_pipeline_running():
+        print("[Agent Monitor] Skipping health audit — pipeline load currently in progress.")
         return
     try:
         combined_metrics = await call_mcp_tool("get_table_health", {"table_names": "orders,order_items"})
@@ -232,6 +245,9 @@ async def chat_endpoint(request: ChatRequest):
 
         if confirm_match:
             raw_names = confirm_match.group(1)
+
+            if await is_pipeline_running():
+                return {"reply": "⚠️ A pipeline load is currently in progress. Please wait for it to finish before running maintenance — running both at once can cause write conflicts on the table."}
 
             maintenance_in_progress["active"] = True
             try:
@@ -408,11 +424,15 @@ async def chat_endpoint(request: ChatRequest):
 
             elif function_name == "execute_confirmed_maintenance":
                 raw_names = function_args.get("table_names", function_args.get("table_name", ""))
-                maintenance_in_progress["active"] = True
-                try:
-                    tool_result = await call_mcp_tool("execute_confirmed_maintenance", {"table_names": raw_names})
-                finally:
-                    maintenance_in_progress["active"] = False
+
+                if await is_pipeline_running():
+                    tool_result = "Cannot run maintenance right now — a pipeline load is currently in progress."
+                else:
+                    maintenance_in_progress["active"] = True
+                    try:
+                        tool_result = await call_mcp_tool("execute_confirmed_maintenance", {"table_names": raw_names})
+                    finally:
+                        maintenance_in_progress["active"] = False
 
             elif function_name == "analyze_occ_crash_log":
                 log_path = BASE_DIR / "logs" / "occ_error.log"

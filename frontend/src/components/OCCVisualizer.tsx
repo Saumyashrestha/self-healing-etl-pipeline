@@ -75,7 +75,7 @@ const OCCVisualizer: React.FC = () => {
   return (
     <div className="flex flex-col w-full max-w-6xl bg-gray-900 rounded-xl shadow-2xl overflow-hidden border border-gray-700 font-mono">
       {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 bg-gray-800 border-b border-gray-700">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 sm:px-6 py-4 bg-gray-800 border-b border-gray-700">
         <div>
           <h3 className="text-white font-bold text-lg">Apache Iceberg: OCC Collision Engine</h3>
           <p className="text-gray-400 text-xs mt-1">Live parallel partition update simulation</p>
@@ -93,7 +93,7 @@ const OCCVisualizer: React.FC = () => {
       </div>
 
       {/* Split Pane Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 h-[500px] bg-black">
+      <div className="grid grid-cols-1 lg:grid-cols-2 h-[800px] lg:h-[500px] bg-black">
 
         {/* LEFT PANE: Action Terminal */}
         <div className="p-5 overflow-y-auto border-r border-gray-800 flex flex-col relative">
@@ -120,7 +120,7 @@ const OCCVisualizer: React.FC = () => {
             <div className="p-4 border-b border-gray-800">
               <h4 className="text-blue-400 text-xs font-bold uppercase mb-3">Baseline (Snapshot V1)</h4>
               <table className="w-full text-[10px] text-gray-400 border-collapse">
-                <thead><tr className="border-b border-gray-700 text-left"><th>ID</th><th>CAT</th><th>STATUS</th></tr></thead>
+                <thead><tr className="border-b border-gray-700 text-left"><th>ID</th><th>CATEGORY</th><th>STATUS</th></tr></thead>
                 <tbody>
                   {v1Table.filter(r => r.startsWith('|')).slice(1).map((row, i) => (
                     <tr key={i} className="border-b border-gray-800">
@@ -135,7 +135,7 @@ const OCCVisualizer: React.FC = () => {
             <div className="p-4">
               <h4 className="text-emerald-400 text-xs font-bold uppercase mb-3">Aftermath (Snapshot V2)</h4>
               <table className="w-full text-[10px] text-gray-400 border-collapse">
-                <thead><tr className="border-b border-gray-700 text-left"><th>ID</th><th>CAT</th><th>STATUS</th></tr></thead>
+                <thead><tr className="border-b border-gray-700 text-left"><th>ID</th><th>CATEGORY</th><th>STATUS</th></tr></thead>
                 <tbody>
                   {v2Table.filter(r => r.startsWith('|')).slice(1).map((row, i) => {
                     const cells = row.split('|').filter(c => c.trim());
