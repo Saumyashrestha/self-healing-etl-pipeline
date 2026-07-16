@@ -86,6 +86,20 @@ agent_tools = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_incident_report",
+            "description": "Generates a postmortem report comparing table health before and after the most recent maintenance event, including root cause attribution.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "The single table name to generate a report for (e.g., 'orders')"}
+                },
+                "required": ["table_name"]
+            }
+        }
     }
 ]
 
@@ -477,6 +491,14 @@ async def chat_endpoint(request: ChatRequest):
                     "- Worker A Status: Failed (Commit aborted).\n\n"
                     "- Storage State: Worker A's partial data files are now 'orphaned' and require cleanup."
                 )
+            
+            elif function_name == "generate_incident_report":
+                try:
+                    table = function_args.get("table_name", "orders")
+                    tool_result = await call_mcp_tool("generate_incident_report", {"table_name": table})
+                except Exception as e:
+                    tool_result = f"Error generating report: {str(e)}"
+                return {"reply": tool_result}
 
             messages.append({
                 "tool_call_id": tool_call_id,

@@ -88,3 +88,8 @@ def register_tools(mcp: FastMCP):
         from src.monitoring.history_logger import read_history
         history = read_history(table_name)
         return json.dumps(history)
+    
+    @mcp.tool()
+    async def generate_incident_report(table_name: str) -> str:
+        from src.monitoring.incident_report import generate_incident_report as gen_report
+        return gen_report(table_name)
