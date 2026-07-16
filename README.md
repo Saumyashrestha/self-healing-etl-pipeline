@@ -1,72 +1,66 @@
 # Self-Healing ETL Pipeline with a Maintenance Copilot
 
-An incremental-load pipeline into Apache Iceberg that deliberately accumulates the "small-file problem," paired with an AI copilot that can observe table health and perform controlled, confirmed maintenance.
+An incremental-load pipeline into Apache Iceberg that deliberately accumulates the "small-file problem," paired with an AI copilot that can observe table health and perform controlled, human-confirmed maintenance.
 
 ---
 
-## 1. Project Purpose
 
-An ingestion job appends small batches into a lakehouse table over time without maintenance ever being run. File counts explode, delete-file bloat accumulates, and query performance degrades. This project:
+## Overview
 
-1. Builds a genuine incremental (merge/upsert) load pipeline from a Postgres OLTP source into Iceberg fact tables.
-2. Deliberately reproduces the small-file/fragmentation problem through repeated small batches.
-3. Quantifies table health with real, measured metrics — before and after maintenance.
-4. Gives an AI agent the ability to observe that state and take a destructive maintenance action only after explicit user confirmation.
+Real-world lakehouses degrade quietly: an ingestion job appends small batches for months, nobody runs maintenance, file counts explode, and queries slow down. This project reproduces that failure mode deliberately, then builds the tooling to diagnose and fix it:
 
----
-
-## 2. Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Table format | Apache Iceberg (Hadoop catalog, local warehouse) |
-| Compute engine | Apache Spark (PySpark) |
-| OLTP source | PostgreSQL |
-| Backend (agent/chat) | FastAPI + Groq (Llama 3.3 70B) |
-| Backend (tools) | FastMCP (Model Context Protocol server) |
-| Scheduling | APScheduler (proactive health checks) |
-| Postgres driver (mutation) | psycopg2 |
-| Postgres driver (Spark reads) | JDBC (`org.postgresql:postgresql`) |
-| Frontend | React + TypeScript, Tailwind CSS |
-| Charting | Recharts |
-| MCP client | `@modelcontextprotocol/sdk` (SSE transport) |
-| Markdown rendering | react-markdown |
+1. A genuine incremental (merge/upsert) load pipeline from a Postgres OLTP source into two Iceberg fact tables.
+2. Fifty-plus small append/update batches that intentionally fragment the tables under merge-on-read.
+3. Real, measured health metrics — before and after maintenance — computed from Iceberg's own metadata tables, never invented.
+4. An AI agent that can observe that state and take a destructive maintenance action **only** after explicit human confirmation.
 
 ---
 
-## 3. Architecture Overview
+## Features
 
-There are **two independent backend processes** and **one frontend**:
+- **Watermark-based CDC pipeline** — reads only what changed in Postgres since the last checkpoint, not a full reload every run.
+- **Realistic OLTP data** — customer and product popularity follow capped, tiered skew (not uniform randomness); catalog prices are fixed per product with discrete sale tiers; order statuses include cancellations, returns, payment failures, and stuck orders.
+- **Live health scoring** — a single, shared formula (fragmentation + delete-bloat weighted) used identically by the chat agent and the dashboard trend chart.
+- **Human-in-the-loop maintenance** — the agent can only *propose* maintenance; execution requires an explicit confirmation step, enforced both in the UI and the backend.
+- **Proactive monitoring** — a scheduled job checks table health every minute and proactively alerts in chat if a table crosses a fixed threshold, without waiting to be asked.
+- **OCC conflict simulation (stretch)** — two concurrent Spark writers touch the same partition; the resulting Iceberg commit rejection is logged with real timestamps and explained by the agent in plain language on request.
+
+---
+
+## Architecture
+
+Two independent backend processes, one frontend:
 
 ```
-┌─────────────────────────────┐        ┌──────────────────────────────┐
-│   FastAPI Agent Backend     │        │      FastMCP Tool Server     │
-│   (main.py — port 8001)     │        │   (src/app/main.py+tools.py  │
-│                              │        │        — port 8000)          │
-│  - /chat (LLM + agent loop) │        │  - get_table_health          │
-│  - /api/agent-notifications │        │  - propose_maintenance       │
-│    (SSE proactive alerts)   │        │  - execute_confirmed_        │
-│  - /api/simulate-occ (SSE)  │        │    maintenance               │
-│  - Groq (Llama 3.3 70B)     │        │  - run_incremental_load      │
-│  - APScheduler (1-min audit)│        │  - get_pipeline_status       │
-└──────────────┬───────────────┘        │  - get_table_history         │
-               │                        │  - get_deep_telemetry        │
-               │                        └──────────────┬───────────────┘
-               │                                        │
-               └───────────────┬────────────────────────┘
-                                │
-                    ┌───────────▼────────────┐
-                    │   React Dashboard        │
-                    │  (Dashboard.tsx,          │
-                    │   AICopilot.tsx)          │
-                    └───────────────────────────┘
+┌──────────────────────────────┐        ┌──────────────────────────────┐
+│   FastAPI Chat Backend        │        │      FastMCP Tool Server     │
+│   (main.py — port 8001)       │◀──────▶│   (src/app/main.py           │
+│                                │  MCP   │    + src/app/tools.py        │
+│  - /chat (LLM + tool loop)    │  (SSE) │        — port 8000)          │
+│  - /api/agent-notifications   │        │                              │
+│    (SSE proactive alerts)     │        │  - get_table_health          │
+│  - /api/simulate-occ (SSE)    │        │  - propose_maintenance       │
+│  - APScheduler (1-min audit)  │        │  - execute_confirmed_        │
+└──────────────┬─────────────────┘        │    maintenance               │
+               │                          │  - run_incremental_load      │
+               │                          │  - get_pipeline_status       │
+               │                          │  - get_table_history         │
+               │                          │  - get_deep_telemetry        │
+               │                          └──────────────┬───────────────┘
+               │                                         │
+               │            ┌────────────────────────────┘
+               │            │
+    ┌──────────▼────────────▼──────────┐
+    │        React Dashboard            │
+    │  Dashboard.tsx  (direct MCP link) │
+    │  AICopilot.tsx  (via FastAPI)     │
+    └────────────────────────────────────┘
 
                ┌────────────────────────────────┐
                │   Shared Spark Session          │
-               │  (src/monitoring/spark_session) │
-               │  — one JVM, reused across all    │
-               │    pipeline/maintenance/metrics  │
-               │    calls, never stopped mid-life │
+               │  one JVM, reused across all      │
+               │  pipeline/maintenance/metrics    │
+               │  calls, never stopped mid-life   │
                └───────────────┬────────────────┘
                                 │
                     ┌───────────▼────────────┐
@@ -82,134 +76,205 @@ There are **two independent backend processes** and **one frontend**:
                     └────────────────────────┘
 ```
 
----
-
-## 4. Data Engineering Layer
-
-### 4.1 Incremental Load Pattern (`src/ingestion/pipeline.py`)
-
-The pipeline follows a genuine **watermark-based CDC (change data capture)** pattern, not a full reload:
-
-1. **First run only**: performs a full initial load of `orders` and `order_items` from Postgres into Iceberg (`createOrReplace`), guarded by `spark.catalog.tableExists(...)` so subsequent runs skip this step entirely.
-2. **Watermark initialization**: on first run, a `pipeline_watermark` control table in Postgres is seeded with the current server time for both `orders` and `order_items`.
-3. **Each of 50 simulated batches**:
-   - Randomly decides a batch composition (`insert_only`, `update_only`, or `both`) with a randomized row count (1–8 inserts, 1–6 updates) — this varies batch size instead of using a fixed shape.
-   - **Mutates real rows in Postgres** (`mutate_postgres()`, via `psycopg2`): advances existing `Pending` orders to `Shipped`, and inserts brand-new orders + their line items.
-   - **Reads only what changed since the watermark** from Postgres via Spark JDBC (`WHERE updated_at > watermark` / `WHERE created_at > watermark`).
-   - **`MERGE INTO`** the changed rows into the corresponding Iceberg table.
-   - **Advances the watermark** to the max timestamp actually processed, only after a successful merge.
-   - Logs a real health snapshot to the history log after every batch.
-
-This means the "new" data in each batch genuinely originates from the OLTP source system, matching real-world CDC pipelines.
-
-### 4.2 Small-File Problem Simulation
-
-Both tables are configured with:
-```
-write.merge.mode = merge-on-read
-write.update.mode = merge-on-read
-```
-Under merge-on-read, every `MERGE` containing an update writes a small new **data file** for changed rows *and* a small **delete file** marking the old version — without rewriting the whole table. Repeating this 50 times with small, varied batches produces genuine fragmentation: dozens of tiny data files and delete files, and one new snapshot per commit.
-
-### 4.3 Health Metrics (`src/monitoring/metrics.py`, `src/monitoring/history_logger.py`)
-
-Two related but distinct components:
-
-- **`metrics.py` — `get_table_metrics()`**: an on-demand, live query against Iceberg's `.files`, `.snapshots`, `.manifests` metadata tables. Computes a weighted health score (70% fragmentation / 30% delete-bloat). Used by the chat agent and the MCP `get_table_health` tool for point-in-time answers.
-- **`history_logger.py` — `log_snapshot_with_session()`**: appends **one permanent row** to a per-table JSONL log (`warehouse/history/{table}_history.jsonl`) every time it's called — during each pipeline batch and again after maintenance. This is what powers the dashboard's trend chart, giving it a real, continuous timeline rather than a single before/after comparison.
-
-**Total Files metric.** The `files` value tracked here is deliberately computed as **data files + delete files combined**, not data files alone. This matters because both tables use merge-on-read: every `MERGE` containing an update writes a small new data file for the changed rows *and* a small delete file marking the old version as superseded, without rewriting the whole table. Since Iceberg always creates exactly one new snapshot per commit — regardless of how much data changed — but a single commit can contribute more than one new physical file whenever it includes updates, the "Total Files" line naturally climbs faster than the "Snapshots" line over time on the dashboard chart. 
-
-### 4.4 Maintenance (`src/maintenance/maintenance.py`)
-
-`execute_table_maintenance(table_name)` runs, in order:
-1. `CALL rewrite_data_files(...)` — compacts small data files into larger ones
-2. `CALL rewrite_position_delete_files(...)` — resolves merge-on-read delete-file bloat
-3. `CALL rewrite_manifests(...)` — reorganizes metadata pointers
-4. `CALL expire_snapshots(..., retain_last => 1)` — removes old snapshot history and orphaned metadata
-
-A final health snapshot is logged immediately afterward, appended to the same history log (never overwriting prior "unhealthy" points), so the dashboard chart shows the full climb-then-drop in one continuous line.
-
-### 4.5 Shared Spark Session (`src/monitoring/spark_session.py`)
-
-All components (pipeline, maintenance, metrics, deep telemetry) share **one long-lived SparkSession** via `get_shared_spark()`, created once and reused for the life of the server process. This allows the 50-batch load, health checks, and maintenance to be triggered repeatedly and in any order, without needing to restart the backend between runs.
+**Note:** the dashboard connects to the MCP tool server directly (via `@modelcontextprotocol/sdk`'s JS client), separately from the chat panel's path through the FastAPI backend. Both reach the same tool server.
 
 ---
 
-## 5. AI Agent & Application Layer
+## Tech Stack
 
-### 5.1 MCP Tools (`src/app/tools.py`, port 8000)
+| Layer | Technology |
+|---|---|
+| Table format | Apache Iceberg (Hadoop catalog, local warehouse), format-version 2, merge-on-read |
+| Compute engine | Apache Spark (PySpark) |
+| OLTP source | PostgreSQL |
+| Backend (chat/agent) | FastAPI + Groq (Llama 3.3 70B) |
+| Backend (tools) | FastMCP (Model Context Protocol server) |
+| Scheduling | APScheduler (proactive health checks) |
+| Postgres driver (mutation) | psycopg2 |
+| Postgres driver (Spark reads) | JDBC (`org.postgresql:postgresql:42.7.3`) |
+| Frontend | React + TypeScript, Tailwind CSS |
+| Charting | Recharts |
+| MCP client (Python) | `mcp.client.sse` / `mcp.client.session` |
+| MCP client (JS) | `@modelcontextprotocol/sdk` (SSE transport) |
+| Markdown rendering | react-markdown |
+
+---
+
+## Prerequisites
+
+- Python 3.10+
+- Node.js 18+ and npm
+- A running PostgreSQL instance
+- A Groq API key ([console.groq.com](https://console.groq.com))
+- Java 8/11/17 (required by PySpark)
+
+---
+
+## Installation
+
+```bash
+# 1. Clone and enter the project
+git clone <your-repo-url>
+cd project2-self-healing-etl
+
+# 2. Python dependencies (ideally inside a virtual environment)
+pip install -r requirements.txt
+
+# 3. Frontend dependencies
+cd frontend
+npm install
+cd ..
+```
+
+---
+
+## Configuration
+
+Create a `.env` file in the project root:
+
+```env
+DATABASE_URL=postgresql://<user>:<password>@<host>:<port>/<dbname>
+GROQ_API_KEY=<your-groq-api-key>
+```
+
+---
+
+## Running the Project
+
+Run these in order, each in its own terminal:
+
+```bash
+# 1. Seed the OLTP source (drops/recreates orders, order_items; loads 10,000 baseline orders)
+python data_generate.py seed
+
+# 2. One-time schema setup (adds updated_at/created_at columns, creates pipeline_watermark)
+python run_ddl_setup.py
+
+# 3. Clear any stale watermark rows
+python reset_watermark.py    
+
+# 4. Start the FastMCP tool server (port 8000)
+python -m src.app.main
+
+# 5. Start the FastAPI chat backend (port 8001)
+python main.py
+
+# 6. Start the frontend
+cd frontend
+npm run dev
+```
+
+Open the frontend URL printed by Vite/npm (typically `http://localhost:5173`).
+
+---
+
+## Usage
+
+1. From the **Dashboard** tab, click **Trigger 50-Batch Load** to run the incremental pipeline and intentionally degrade a table.
+2. Watch the trend chart — file count should climb faster than snapshot count as merge-on-read accumulates small data and delete files.
+3. Switch to the **AI Copilot** tab and ask:
+   - *"Is the orders table healthy?"* — the agent reports real, current metrics.
+   - *"Clean it up."* — the agent proposes maintenance; a confirmation card appears with **Execute Compaction** / **Dismiss**.
+4. Click **Execute Compaction** — this is the only path that actually runs the destructive maintenance procedure. Post-maintenance health is reported using real numbers, not a generated summary.
+5. (Stretch) Go to the **OCC Simulation** tab, click **Trigger Data Collision**, then ask the copilot *"What is the OCC conflict that occurred?"* for a plain-language, log-grounded explanation.
+
+---
+
+## Project Structure
+
+```
+project2-self-healing-etl/
+├── data_generate.py            # Postgres seeding + incremental OLTP simulation
+├── main.py                     # FastAPI chat backend (port 8001)
+├── mcp_client.py                # Python MCP client bridge (FastAPI -> MCP tool server)
+├── run_ddl_setup.py             # One-time Postgres schema setup
+├── reset_watermark.py           # Truncates pipeline_watermark for a clean reset
+├── requirements.txt
+├── frontend/
+│   └── src/
+│       ├── App.tsx
+│       └── components/
+│           ├── AICopilot.tsx
+│           ├── Dashboard.tsx
+│           ├── OCCDiagram.tsx
+│           └── OCCVisualizer.tsx
+├── logs/
+│   ├── occ_error.log
+│   └── simulation_history.log
+├── src/
+│   ├── app/
+│   │   ├── main.py              # MCP tool server entrypoint (port 8000)
+│   │   └── tools.py              # MCP tool definitions
+│   ├── ingestion/
+│   │   └── pipeline.py           # Watermark-based CDC load + degrade simulation
+│   ├── maintenance/
+│   │   └── maintenance.py        # Iceberg compaction/expiry procedures
+│   ├── monitoring/
+│   │   ├── metrics.py            # Live health scoring
+│   │   ├── history_logger.py     # Persistent JSONL trend history
+│   │   └── spark_session.py      # Shared SparkSession singleton
+│   └── utils/
+│       └── catalog.py            # Realistic fake-data generation logic
+├── tests/
+│   ├── test_iceberg_concurrency.py  # OCC simulation script
+│   └── verify_data.py               # Manual ad-hoc query script
+└── warehouse/                    # Iceberg data + JSONL health history (git-ignored)
+```
+
+---
+
+## MCP Tools Reference
 
 | Tool | Purpose |
 |---|---|
 | `get_table_health` | Live health metrics for one or more tables |
-| `propose_maintenance` | Step 1 of the human-in-the-loop flow — announces intent only |
+| `propose_maintenance` | Step 1 of the human-in-the-loop flow — announces intent only, no side effects |
 | `execute_confirmed_maintenance` | Step 2 — runs the actual destructive maintenance, only reachable after confirmation |
-| `run_incremental_load` | Triggers the 50-batch pipeline as a background task; rejects overlapping runs via a shared `_pipeline_status` flag |
-| `get_pipeline_status` | Polled by the dashboard every 4 seconds to detect real completion (not just task launch) |
+| `run_incremental_load` | Triggers the 50-batch pipeline as a background task; rejects overlapping runs |
+| `get_pipeline_status` | Polled by the dashboard to detect real completion of a triggered load |
 | `get_table_history` | Returns the full persisted JSONL history for the trend chart |
-| `get_deep_telemetry` | Raw snapshot/manifest/file listings for a detailed inspection view |
-
-### 5.2 API Endpoints (`main.py`, port 8001)
-
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `/chat` | POST | Main copilot endpoint (see 5.3 for internal logic) |
-| `/api/agent-notifications` | GET (SSE) | Streams proactive health alerts to all connected clients |
-| `/api/simulate-occ` | GET (SSE) | Runs and live-streams the OCC concurrency simulation subprocess |
-
-### 5.3 How the Copilot Decides What To Do
-
-Not every message is handled the same way. Simple confirmations, cancellations, and questions about a concurrency conflict are answered directly and deterministically, using real system state — the LLM isn't involved in producing those answers at all, which keeps them fast and guaranteed accurate. Everything else is handled conversationally: the copilot is given access to its tools only when a message actually looks like it relates to table health or maintenance, and it can call a tool, read the result, and decide whether to call another or answer directly — within a bounded number of steps, so it always resolves to a final answer.
-
-### 5.4 Human-in-the-Loop Maintenance Flow
-
-Maintenance can be requested either by asking the copilot directly ("clean up the orders table") or by responding to a proactive alert. Either way, the copilot never performs the maintenance itself in that moment — it only proposes it, and the frontend presents an explicit confirmation card with Execute Compaction and Dismiss actions. Only an explicit tap on Execute Compaction triggers the actual compaction and snapshot expiration; the resulting response reports real post-maintenance health numbers, not a summary generated by the model. This guarantees the destructive action is always gated behind a genuine, unambiguous confirmation step.
-
-### 5.5 Proactive Monitoring
-
-`APScheduler` runs `run_health_audit()` every minute, computing a real numeric health score from `get_table_metrics()` and comparing it against a fixed threshold — not an LLM's subjective judgment. If either table falls below the threshold, an alert is pushed over SSE to `/api/agent-notifications` and rendered in chat with the same confirmation-card flow.
-
-### 5.6 Optimistic Concurrency Control (OCC) Conflict Simulation
-
-This is a stretch-goal feature demonstrating what happens when two writers touch the same Iceberg partition at the same time, and how the agent can explain that failure afterward in plain language.
-
-**An isolated test table.**
-This simulation does not run against the orders or order_items fact tables used elsewhere in the project. It creates and uses its own dedicated Iceberg table (db.occ_test), rebuilt fresh on every run with a small set of partitioned baseline rows. This keeps the concurrency demonstration fully isolated from the pipeline and maintenance workflows, so triggering it never affects the fragmentation metrics or history shown on the main dashboard.
-
-**How it's run.**
-The simulation is triggered from the frontend's OCC tab, which calls the backend's /api/simulate-occ endpoint. This spins up the test table, then launches two Spark processes concurrently as separate OS processes: Worker A reads a partition to establish its snapshot baseline, then deliberately pauses to simulate real processing time before attempting to commit an update. Worker B reads the same partition but commits its own update almost immediately. Because Worker B commits first, the table advances to a new snapshot before Worker A gets a chance to commit — so when Worker A finally attempts its write, Iceberg detects that Worker A's baseline no longer matches the table's current state and rejects the commit. This is Iceberg's optimistic concurrency control working as intended: rather than silently overwriting Worker B's change, the conflicting commit is refused outright.
-
-**Live visualization.**
-The OCCVisualizer component consumes this stream and displays the two workers' progress, the test table's state before and after, and the moment of conflict, in real time as it happens.
-
-**Explaining the conflict in chat.**
-Every meaningful event in the simulation — Worker A's baseline read, Worker B's successful commit, and Worker A's rejected commit — is logged with a real timestamp. Once a run has completed, asking the copilot something like "what is the OCC conflict that occurred?" produces an explanation built directly from those logged timestamps: the actual time elapsed between each event, the real error Iceberg raised, and a plain-language account of why the commit was rejected and what it means for data integrity. 
+| `get_deep_telemetry` | Raw snapshot/manifest/file listings for detailed inspection |
 
 ---
 
-## 6. Frontend
+## API Endpoints
 
-| Component | Responsibility |
-|---|---|
-| `Dashboard.tsx` | Table health cards, fragmentation trend chart (Recharts `AreaChart`), 50-batch load trigger with real completion polling |
-| `AICopilot.tsx` | Full chat interface — Markdown rendering, proactive alert display, confirmation card locking |
-| `IcebergMetrics.tsx` | Deep telemetry view (raw snapshots/manifests/files) |
-| `OCCVisualizer.tsx` | Streams and displays the live OCC simulation |
-
-The dashboard connects to the MCP server via a single **persistent SSE client connection**, reused across all tool calls — including the 4-second status polling loop used to detect when a triggered pipeline run has actually finished.
+| Endpoint | Method | Server | Purpose |
+|---|---|---|---|
+| `/chat` | POST | FastAPI (:8001) | Main copilot endpoint |
+| `/api/agent-notifications` | GET (SSE) | FastAPI (:8001) | Streams proactive health alerts |
+| `/api/simulate-occ` | GET (SSE) | FastAPI (:8001) | Runs and streams the OCC concurrency simulation |
+| `/sse` | GET (SSE) | MCP server (:8000) | MCP tool-call transport |
 
 ---
 
-### 7. Running the Project
+## Resetting Project State
 
+Run this whenever the underlying data-generation logic changes, or state becomes inconsistent:
 
-1. Install Python dependencies: pip install -r requirements.txt (from the project root, ideally inside a virtual environment).
+```bash
+# Windows PowerShell
+Remove-Item -Recurse -Force warehouse
+python data_generate.py seed
+python run_ddl_setup.py
+python reset_watermark.py
 
-2. Install frontend dependencies: npm install (from the frontend/ folder).
-3. Ensure Postgres is running and reachable via DATABASE_URL in .env.
-4. Run the one-time schema setup (scripts/one_time_schema_setup.py) to add updated_at/created_at columns and create the pipeline_watermark table, if not already applied.
-5. Start the FastMCP tool server (port 8000).
-6. Start the FastAPI agent backend (main.py, port 8001) — requires GROQ_API_KEY in .env.
-7. Start the frontend (npm run dev in frontend/).
-8. From the dashboard: click Trigger 50-Batch Load to degrade a table, then use the chat panel to ask "is the orders table healthy?" or say "clean it up" to confirm and run maintenance.
+# macOS/Linux
+rm -rf warehouse/
+python data_generate.py seed
+python run_ddl_setup.py
+python reset_watermark.py
+```
+
+This clears the Iceberg warehouse (tables, snapshots, health history logs), re-seeds Postgres with fresh baseline data, restores the CDC-required columns and watermark table, and clears any stale watermark rows.
+
+---
+
+## Known Limitations
+
+- `_pipeline_status` and `maintenance_in_progress` are in-memory flags local to the FastAPI process — not persisted, not shared across multiple backend instances.
+- The dashboard connects to the MCP tool server directly, bypassing the FastAPI backend, while the chat panel goes through FastAPI — two independent client paths to the same server.
+- The health-alert threshold (70%) is a fixed constant, not derived from a formal SLA.
+- No automated test suite; `tests/` contains manual verification scripts, not pytest tests.
+
+---

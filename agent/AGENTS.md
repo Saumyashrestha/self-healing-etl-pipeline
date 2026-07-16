@@ -62,7 +62,7 @@ cd frontend && npm run dev
 rm -rf warehouse/            # Windows: Remove-Item -Recurse -Force warehouse
 python data_generate.py seed
 python run_ddl_setup.py
-python scripts/reset_watermark.py   # if present — truncates pipeline_watermark
+python reset_watermark.py    # truncates pipeline_watermark — without this, a stale row can cause the first incremental batch to pull the entire re-seeded baseline instead of a small slice
 ```
 
 **No automated test suite observed.** `tests/test_iceberg_concurrency.py` is the OCC simulation script itself (invoked as a subprocess by the FastAPI backend, not a pytest test). `tests/verify_data.py` is a manual standalone Spark query script, run directly (`python tests/verify_data.py`), not wired into any test runner.
@@ -77,6 +77,7 @@ project2-self-healing-etl/
 ├── main.py                     # FastAPI chat backend (port 8001)
 ├── mcp_client.py                # Python MCP client bridge (FastAPI -> MCP tool server)
 ├── run_ddl_setup.py             # One-time Postgres schema setup
+├── reset_watermark.py           # Truncates pipeline_watermark before a fresh pipeline run
 ├── requirements.txt
 ├── readme.md
 ├── frontend/
