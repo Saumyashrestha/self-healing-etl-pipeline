@@ -15,8 +15,8 @@ def register_tools(mcp: FastMCP):
         reports = []
         for table in tables:
             metrics = get_table_metrics(table)
-            reports.append(f"[{table.upper()}]: {metrics}")
-        return " \n ".join(reports)
+            reports.append(f"**{table.upper()}**\n- {metrics.replace('. ', '\n- ').rstrip('- ')}")
+        return " \n\n ".join(reports)
 
     @mcp.tool()
     async def propose_maintenance(table_names: str) -> str:
@@ -30,7 +30,7 @@ def register_tools(mcp: FastMCP):
         for t in tables:
             res = execute_table_maintenance(t)
             results.append(res)
-        return " \n ".join(results)
+        return " \n\n ".join(results)
     
     @mcp.tool()
     async def run_incremental_load(batches: int = 50) -> str:

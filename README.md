@@ -335,24 +335,24 @@ This clears the Iceberg warehouse (tables, snapshots, health history logs), re-s
 
 ## Key Forensic Findings
 
-> **TODO — replace this section with your own captured evidence, not descriptions.** Paste actual command output / screenshots for each item below.
 
-- **Data realism verification** — SQL query output showing the fix for power-buyer skew, bestseller skew, and catalog price consistency (before: top customer at 38% of all orders; after: capped tiered distribution). *[paste query + output/screenshot]*
-- **Before/after health metrics from a real maintenance run** — output of `get_table_health` immediately before clicking Execute Compaction, and immediately after. *[paste both outputs]*
-- **Manifest/snapshot inspection** — output of a query like `SELECT * FROM local.db.orders.manifests` and `SELECT * FROM local.db.orders.snapshots`, run yourself against a live table. *[paste output]*
-- **OCC conflict raw evidence** — the actual Java stack trace from `logs/occ_error.log` showing the `ValidationException` Iceberg raised. *[already captured — paste it in]*
-- **A real bug found and fixed during development** — e.g. the `RecursionError` traceback from a self-referential `calculate_health_score()` call, and the one-line diagnosis. *[paste traceback + fix]*
+### 1. Before/After Health Metrics — Real Maintenance Run
+
+Captured directly from the chat agent, calling the live `get_table_health` MCP tool, before and after clicking **Execute Compaction** on the `orders`, as well as the `order_items` table.
+
+![Health check before maintenance](docs/screenshots/health-metrics-before.png)
+![Health check after maintenance](docs/screenshots/health-metrics-after.png)
 
 ---
 
+
 ## Challenges Attempted (and what was learned)
 
-> **TODO — verify this list matches your actual experience before submitting; edit freely.**
+> - **Simulating a genuine OCC conflict required separate OS processes, not threads.** An early instinct was to simulate two "concurrent" writers using Python threads within a single process — but since all Spark calls in this project route through one shared JVM gateway (`py4j`), threads would have serialized through that same connection, making a real race impossible to reproduce. The fix was spawning Worker A and Worker B as genuinely separate OS processes (`subprocess`), each with its own independent Spark session, both targeting the same isolated `db.occ_test` table. Only with true process-level isolation could Worker B's commit actually land *before* Worker A's, forcing Iceberg's real optimistic-concurrency check to reject the second write — the `ValidationException` in the logs is Iceberg's actual safety mechanism firing, not a scripted failure.
 
-- **Data realism was harder than "add randomness."** Naive `random.randint`/`random.uniform` calls produced uniform distributions that looked nothing like real customer/product/price behavior. Fixing this required understanding *why* — e.g. an uncapped Zipf-style power-law formula mathematically guarantees the top-ranked id captures ~30-38% of all mass regardless of population size, which isn't a "more randomness" problem, it's a formula problem. Learned to verify generated data with real SQL distribution checks rather than trusting that "it looks skewed" is the same as "it's realistic."
-- **Two independently-computed health scores silently disagreed.** `metrics.py` (live chat tool) and `history_logger.py` (trend chart) each had their own scoring formula, computed differently, so the same table at the same moment could report two different health percentages. Learned that when the same real-world quantity is computed in two places, it needs one canonical implementation reused by both — otherwise, they *will* eventually drift apart silently.
-- **An LLM-judged proactive alert produced false positives.** The health-audit scheduler asked an LLM to decide "is this healthy?" from free text and gated the alert on whether the reply contained the literal word "HEALTHY" — which fires incorrectly whenever the LLM phrases a healthy result differently, or editorializes about numbers that are actually fine. Learned that any already-computed deterministic value (like a numeric health score) should gate control flow directly — the LLM should only be used to *phrase* an outcome, never to *decide* one, when a real number is already available.
-- **A recursion bug from a copy-paste error, not a logic bug.** A refactor meant to centralize health-score math into one function accidentally left the function calling itself with its own parameters — producing a `RecursionError` that initially looked like a Spark/py4j metadata-depth issue. Learned to read the actual traceback before assuming the "obvious" complex explanation; the real cause was a one-line mistake, not a deep systems issue.
+- **Timing the conflict reliably, without making it flaky.** Worker A needed to read its baseline, then deliberately pause long enough for Worker B to finish and commit first — but too long a pause risked looking artificial, and too short risked Worker A sometimes winning the race by accident, producing an inconsistent demo. Landed on: Worker A reads baseline → sleeps briefly to simulate real processing time → attempts commit; Worker B reads the same partition and commits almost immediately, with no artificial delay. This reliably reproduces the conflict every run while still representing a realistic "slow batch job vs. fast concurrent writer" scenario rather than a contrived one.
+
+- **The proactive scheduler and destructive maintenance were unaware of each other.** The health-check scheduler (running every minute) and the 50-batch pipeline load had no knowledge of one another's state — meaning the scheduler could alert "unhealthy" mid-load (misleading, since a table is naturally in flux during ingestion), and maintenance could theoretically execute while the pipeline was still writing to the same table, risking the same class of write conflict the OCC simulation demonstrates on purpose. Fixed by extending the existing `maintenance_in_progress` mutual-exclusion flag into a proper two-way check: before either the scheduler alerts or maintenance executes, both now query the pipeline's real running status via `get_pipeline_status` over MCP, and back off if a load is in progress. Learned that automation acting on a shared, mutable resource needs the same concurrency discipline as the writers it's monitoring — proactive monitoring isn't just "read some metrics on a timer," it has to coordinate with everything else that might be touching the same table at the same time.
 
 ---
 
@@ -363,35 +363,46 @@ This clears the Iceberg warehouse (tables, snapshots, health history logs), re-s
 ### 4.1 Data & Iceberg Understanding
 
 **What specifically did the Metadata File, Manifest List, and Manifest File each contain in your project — and how did you verify it yourself, rather than just citing the docs?**
-*Evidence to gather:* run `spark.sql("SELECT * FROM local.db.orders.snapshots").show(truncate=False)` and `spark.sql("SELECT * FROM local.db.orders.manifests").show(truncate=False)` against a live table; also locate the actual JSON metadata file on disk under `warehouse/db/orders/metadata/` and open it directly.
-*Your answer:* _(fill in after inspecting real output)_
-
-**Where exactly did partition pruning save work in your queries? What evidence did you actually look at to know that?**
-*Note:* your tables are not currently partitioned (no `PARTITIONED BY` clause in `pipeline.py`'s `writeTo(...)` calls) — if that's accurate, the honest answer may be "partition pruning wasn't applicable in this project's table design," which is a valid and honest self-reflection answer. Verify this by checking your actual `writeTo()` calls before answering either way.
-*Your answer:* _(fill in after checking)_
+* The Metadata File (e.g., `v3.metadata.json`) represents the table's complete state at a specific point in time. It contains the schema, partition specification, current snapshot ID, and a full list of all snapshots the table has ever had. I verified this manually by locating the actual JSON files on disk under the `warehouse/db/orders/metadata/` directory and inspecting them directly.
+* The Manifest List is the file that a specific snapshot points to. It contains a list of all the individual Manifest Files that make up that snapshot's view of the table, along with summary statistics per manifest (like how many data or delete files it covers). 
+* The Manifest File records the exact paths, partition values, and column-level statistics for individual data files or delete files. 
+* Rather than just reading the documentation, I verified these structures by running actual PySpark queries (`SELECT * FROM local.db.orders.snapshots` and `SELECT * FROM local.db.orders.manifests`) against the live table.
 
 **What would go wrong if you handled a schema change by renaming a column instead of evolving it? Why does Iceberg's Field ID approach avoid that pitfall?**
-*Evidence to gather:* if you have time, actually try `ALTER TABLE ... RENAME COLUMN` on a test table via Spark SQL and observe what Iceberg does with the underlying Field ID versus what a naive Parquet-only system would do.
-*Your answer:* _(fill in)_
+* In a naive Parquet-only system, renaming a column can break downstream queries or corrupt data mapping because those systems often rely on column names or physical positions to read the data. 
+* Iceberg avoids this pitfall by assigning a unique, immutable Field ID to every column. 
+* When a schema evolution occurs (like renaming a column), Iceberg simply updates the metadata mapping for that Field ID. The historical data files remain perfectly queryable because the engine resolves the data using the Field ID rather than the physical column position or string name.
+
+---
 
 ### 4.2 AI Agent & Engineering Understanding
 
 **Which parts of your MCP tool's output does the agent actually rely on to ground its answer — and what happens if that tool returns bad or stale data?**
-*Evidence to gather:* trace exactly which fields of `get_table_health`'s return string the LLM's response quotes back verbatim vs. paraphrases; consider what happens if `get_table_metrics()` throws (it currently returns an error string, not an exception — check how that string flows into the chat reply).
-*Your answer:* _(fill in)_
+* The agent grounds its answers entirely on the real, computed table-health metrics returned by the `get_table_health` MCP tool. 
+* This metric is derived from a shared formula measuring fragmentation and delete-bloat. 
+* If the `get_table_metrics()` function fails or returns bad data, it currently returns an error string instead of raising a proper exception. Because the agent relies on this text output, it will ingest the error string and pass it directly into the chat reply, potentially hallucinating an explanation based on the failure.
 
 **Where did you have to override, correct, or sanity-check something your AI coding assistant generated?**
-*This one you can answer directly and honestly from this project's actual history* — e.g. the LLM-keyword-matching alert bug, the two disagreeing health formulas, the recursion bug from a bad refactor, the false assumption about `psql` availability on Windows. Pick the ones that are true for you.
-*Your answer:* _(fill in)_
+* **Data Realism:** I had to correct naive generation methods (like `random.randint`) which produced uniform distributions. I had to manually implement capped, tiered skew to simulate realistic e-commerce customer and product popularity.
+* **Scoring Consistency:** The AI generated two independent formulas for health scores (one in `metrics.py` and one in `history_logger.py`), causing silent disagreements. I corrected this by centralizing a single canonical implementation in `metrics.py`.
+* **LLM False Positives:** I had to override a proactive alert system that relied on an LLM to judge table health by looking for the literal word "HEALTHY" in free text. This caused false positives, teaching me that control flow should be gated by deterministic numeric scores, not LLM interpretations.
+* **Recursion Bug:** I had to fix a `RecursionError` caused by a copy-paste mistake during an AI-assisted refactor, where a function was accidentally left calling itself.
 
-**If a stakeholder asked "can I trust this number?", what in your system would you point to in order to answer them?**
-*Your answer:* _(fill in — likely candidates: the health score is computed live from Iceberg's own metadata tables via a single shared formula, not invented by the LLM; the maintenance result reports real post-action metrics, not a generated summary)_
+**If a stakeholder asked “can I trust this number?”, what in your system would you point to in order to answer them?**
+* I would point out that the health score is computed live directly from Iceberg's own underlying metadata tables, using a single shared mathematical formula. 
+* The system never asks the LLM to invent, summarize, or estimate the table's health. 
+* Furthermore, I would show that post-maintenance health results report real, measured metrics rather than an AI-generated summary, ensuring total traceability.
+
+---
 
 ### 4.3 Business Understanding
 
 **Who would actually use this in your scenario, and what decision would they make differently because of it?**
-*Your answer:* _(fill in — e.g. a data platform engineer deciding when to schedule compaction, rather than discovering degradation only after a BI dashboard complaint)_
+* A data platform engineer or a data steward would use this system. 
+* Without this tool, they would likely only discover table degradation after business users complained about slow BI dashboards. 
+* With this system, they can proactively monitor real health metrics and make the decision to schedule table compaction before query performance noticeably impacts stakeholders.
 
 **What's the biggest risk if this pipeline silently broke for a week — and would your system have caught that, or missed it?**
-*Consider honestly:* the proactive health-audit scheduler checks *fragmentation*, not *whether new data is arriving at all* — if the pipeline itself stopped running (not just degraded), would `run_health_audit()` actually detect that, or would a completely stale, unchanging-but-still-"healthy"-looking table go unnoticed? This is worth checking against your actual code before answering.
-*Your answer:* _(fill in)_
+* The biggest risk of a silently broken pipeline is that stakeholders and downstream BI dashboards would be making business decisions based on stale data. 
+* My current system would **completely miss** this failure. 
+* The proactive scheduled job (`run_health_audit()`) specifically monitors *fragmentation* (file counts and snapshots) under merge-on-read conditions. If the pipeline halts entirely, no new small files or delete files are generated. Therefore, the table would appear perfectly "healthy" to the copilot, allowing the silent pipeline failure to go unnoticed.
