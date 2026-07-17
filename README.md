@@ -358,8 +358,6 @@ Captured directly from the chat agent, calling the live `get_table_health` MCP t
 
 ## Self-Reflection
 
-> **TODO — these require your own investigation and honest answers. Do not submit AI-generated answers to these questions; the grading explicitly checks for real depth, not plausible-sounding text.** For each question below, the evidence you need to gather is listed — go run the described command/inspection yourself, then write the answer from what you actually observe.
-
 ### 4.1 Data & Iceberg Understanding
 
 **What specifically did the Metadata File, Manifest List, and Manifest File each contain in your project — and how did you verify it yourself, rather than just citing the docs?**
