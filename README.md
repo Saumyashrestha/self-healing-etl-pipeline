@@ -380,11 +380,6 @@ Captured directly from the chat agent, calling the live `get_table_health` MCP t
 * This metric is derived from a shared formula measuring fragmentation and delete-bloat. 
 * If the `get_table_metrics()` function fails or returns bad data, it currently returns an error string instead of raising a proper exception. Because the agent relies on this text output, it will ingest the error string and pass it directly into the chat reply, potentially hallucinating an explanation based on the failure.
 
-**Where did you have to override, correct, or sanity-check something your AI coding assistant generated?**
-* **Data Realism:** I had to correct naive generation methods (like `random.randint`) which produced uniform distributions. I had to manually implement capped, tiered skew to simulate realistic e-commerce customer and product popularity.
-* **Scoring Consistency:** The AI generated two independent formulas for health scores (one in `metrics.py` and one in `history_logger.py`), causing silent disagreements. I corrected this by centralizing a single canonical implementation in `metrics.py`.
-* **LLM False Positives:** I had to override a proactive alert system that relied on an LLM to judge table health by looking for the literal word "HEALTHY" in free text. This caused false positives, teaching me that control flow should be gated by deterministic numeric scores, not LLM interpretations.
-
 **If a stakeholder asked “can I trust this number?”, what in your system would you point to in order to answer them?**
 * I would point out that the health score is computed live directly from Iceberg's own underlying metadata tables, using a single shared mathematical formula. 
 * The system never asks the LLM to invent, summarize, or estimate the table's health. 
