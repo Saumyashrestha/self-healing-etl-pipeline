@@ -4,15 +4,45 @@ An incremental-load pipeline into Apache Iceberg that deliberately accumulates t
 
 ---
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Data Model](#data-model)
+- [Tech Stack](#tech-stack)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Running the Project](#running-the-project)
+- [Usage](#usage)
+- [Project Structure](#project-structure)
+- [MCP Tools Reference](#mcp-tools-reference)
+- [API Endpoints](#api-endpoints)
+- [Resetting Project State](#resetting-project-state)
+- [Known Limitations](#known-limitations)
+- [Stretch Goals Status](#stretch-goals-status)
+- [Key Forensic Findings](#key-forensic-findings)
+- [Challenges Attempted](#challenges-attempted-and-what-was-learned)
+- [Self-Reflection](#self-reflection)
+
+---
 
 ## Overview
 
-Real-world lakehouses degrade quietly: an ingestion job appends small batches for months, nobody runs maintenance, file counts explode, and queries slow down. This project reproduces that failure mode deliberately, then builds the tooling to diagnose and fix it:
+This project is a self-healing ETL pipeline built on Apache Iceberg, paired with an AI maintenance copilot. It's composed of two parts working together:
+
+- A data engineering pipeline that performs genuine incremental (watermark-based CDC) loads from a Postgres OLTP source into two Iceberg fact tables, then deliberately runs 50+ small append/update batches to reproduce the "small-file problem" that real merge-on-read lakehouses accumulate over time.
+- An AI agent layer (FastAPI + an MCP tool server) that can observe real, computed table-health metrics, proactively flag degradation, and perform destructive maintenance (compaction, delete-file resolution, manifest rewriting, snapshot expiry) — but only after a human explicitly confirms the action.
+
+**Business scenario:** an e-commerce platform's checkout service continuously writes to orders and order_items in Postgres. Those tables are mirrored into an Iceberg lakehouse for analytics — but no one owns lakehouse maintenance day-to-day. Over weeks, small incremental writes fragment the tables under merge-on-read: file counts climb, BI dashboards querying these tables get progressively slower, and by the time anyone notices, the cause isn't obvious from the outside. This project puts an engineer in that seat: reproduce the failure mode honestly, measure it with real numbers, and give an AI copilot the ability to both catch it early and fix it — without ever being allowed to act destructively on its own judgment.
+
+In short:
 
 1. A genuine incremental (merge/upsert) load pipeline from a Postgres OLTP source into two Iceberg fact tables.
 2. Fifty-plus small append/update batches that intentionally fragment the tables under merge-on-read.
 3. Real, measured health metrics — before and after maintenance — computed from Iceberg's own metadata tables, never invented.
-4. An AI agent that can observe that state and take a destructive maintenance action **only** after explicit human confirmation.
+4. An AI agent that can observe that state and take a destructive maintenance action only after explicit human confirmation.
 
 ---
 
@@ -29,54 +59,71 @@ Real-world lakehouses degrade quietly: an ingestion job appends small batches fo
 
 ## Architecture
 
-Two independent backend processes, one frontend:
+Two independent backend processes, one frontend, connected through an MCP tool server:
 
-```
-┌──────────────────────────────┐        ┌──────────────────────────────┐
-│   FastAPI Chat Backend        │        │      FastMCP Tool Server     │
-│   (main.py — port 8001)       │◀──────▶│   (src/app/main.py           │
-│                                │  MCP   │    + src/app/tools.py        │
-│  - /chat (LLM + tool loop)    │  (SSE) │        — port 8000)          │
-│  - /api/agent-notifications   │        │                              │
-│    (SSE proactive alerts)     │        │  - get_table_health          │
-│  - /api/simulate-occ (SSE)    │        │  - propose_maintenance       │
-│  - APScheduler (1-min audit)  │        │  - execute_confirmed_        │
-└──────────────┬─────────────────┘        │    maintenance               │
-               │                          │  - run_incremental_load      │
-               │                          │  - get_pipeline_status       │
-               │                          │  - get_table_history         │
-               │                          │  - get_deep_telemetry        │
-               │                          └──────────────┬───────────────┘
-               │                                         │
-               │            ┌────────────────────────────┘
-               │            │
-    ┌──────────▼────────────▼──────────┐
-    │        React Dashboard            │
-    │  Dashboard.tsx  (direct MCP link) │
-    │  AICopilot.tsx  (via FastAPI)     │
-    └────────────────────────────────────┘
-
-               ┌────────────────────────────────┐
-               │   Shared Spark Session          │
-               │  one JVM, reused across all      │
-               │  pipeline/maintenance/metrics    │
-               │  calls, never stopped mid-life   │
-               └───────────────┬────────────────┘
-                                │
-                    ┌───────────▼────────────┐
-                    │   Apache Iceberg Tables  │
-                    │  local.db.orders          │
-                    │  local.db.order_items     │
-                    └───────────┬────────────┘
-                                │
-                    ┌───────────▼────────────┐
-                    │   PostgreSQL (OLTP)      │
-                    │  orders, order_items,    │
-                    │  pipeline_watermark      │
-                    └────────────────────────┘
-```
+![Architecture Diagram](docs/architecture-diagram.png)
 
 **Note:** the dashboard connects to the MCP tool server directly (via `@modelcontextprotocol/sdk`'s JS client), separately from the chat panel's path through the FastAPI backend. Both reach the same tool server.
+
+---
+
+## Data Model
+
+Two fact tables, mirrored 1:1 from Postgres into Iceberg. No separate physical dimension tables — `customer_id` and `product_id` are foreign-key-style references into logical dimensions generated by `catalog.py` (fixed catalog pricing, tiered popularity), not their own tables.
+
+**Fact: `orders`**
+| Column | Type | Notes |
+|---|---|---|
+| `order_id` | INT (PK) | |
+| `customer_id` | INT | references the logical customer dimension in `catalog.py` |
+| `order_date` | TIMESTAMP | |
+| `amount` | DECIMAL(10,2) | sum of this order's `order_items.price` |
+| `status` | VARCHAR(20) | Pending / Shipped / Completed / Cancelled / Returned / Payment Failed |
+| `updated_at` | TIMESTAMP | added post-seed; drives the CDC watermark filter |
+
+**Fact: `order_items`**
+| Column | Type | Notes |
+|---|---|---|
+| `item_id` | SERIAL (PK) | |
+| `order_id` | INT (FK → orders.order_id) | |
+| `product_id` | INT | references the logical product dimension in `catalog.py` |
+| `price` | DECIMAL(10,2) | catalog base price, or one of a small set of fixed sale-tier prices |
+| `created_at` | TIMESTAMP | added post-seed; drives the CDC watermark filter |
+
+**Relationship:** `orders` 1 → many `order_items`.
+
+```mermaid
+erDiagram
+    ORDERS ||--o{ ORDER_ITEMS : contains
+    ORDERS {
+        int order_id PK
+        int customer_id
+        timestamp order_date
+        decimal amount
+        varchar status
+        timestamp updated_at
+    }
+    ORDER_ITEMS {
+        int item_id PK
+        int order_id FK
+        int product_id
+        decimal price
+        timestamp created_at
+    }
+```
+
+---
+
+## Iceberg Concepts in This Project
+
+Since the core of this project is really about understanding how Iceberg's table format works internally — not just calling its SQL procedures — here's what each piece of metadata actually is, and where it shows up concretely in this codebase.
+
+
+- **Metadata File** — a single JSON file (e.g. v3.metadata.json) representing the table's complete state at a point in time: its schema, partition spec, current snapshot ID, and the full list of all snapshots the table has ever had. A new one is written on every commit (writeTo(...), every MERGE INTO, every maintenance call). Found on disk under warehouse/db/orders/metadata/.
+- **Snapshot** — one committed version of the table, identified by a snapshot_id. Every MERGE INTO in pipeline.py, and every one of the four procedures called in execute_table_maintenance(), creates exactly one new snapshot — regardless of how many rows or files that operation touched. Queried in this project via SELECT * FROM local.db.orders.snapshots (used in get_table_metrics() and get_deep_telemetry).
+- **Manifest List** — the file a snapshot points to; it's a list of all the Manifest Files that make up that snapshot's view of the table, along with summary stats per manifest (e.g. how many data/delete files it covers).
+- **Manifest File** — one entry in the manifest list; it's the file that actually records each individual data file or delete file's path, partition values, and column-level stats. This is what local.db.orders.manifests and local.db.orders.files are querying under the hood. rewrite_manifests (step 3 of execute_table_maintenance()) consolidates many small manifest files into fewer, larger ones — separate from compacting the data files themselves.
+- **Delete Files** — under merge-on-read (the mode both tables use here), an UPDATE inside a MERGE INTO doesn't rewrite the existing data file — it writes a small new data file for the changed row(s) and a small delete file marking the old row version as superseded. This is the direct mechanical cause of the fragmentation this project deliberately reproduces over 50 batches, and exactly what rewrite_position_delete_files (step 2 of maintenance) resolves.
 
 ---
 
@@ -150,16 +197,13 @@ python data_generate.py seed
 # 2. One-time schema setup (adds updated_at/created_at columns, creates pipeline_watermark)
 python run_ddl_setup.py
 
-# 3. Clear any stale watermark rows
-python reset_watermark.py    
-
-# 4. Start the FastMCP tool server (port 8000)
+# 3. Start the FastMCP tool server (port 8000)
 python -m src.app.main
 
-# 5. Start the FastAPI chat backend (port 8001)
+# 4. Start the FastAPI chat backend (port 8001)
 python main.py
 
-# 6. Start the frontend
+# 5. Start the frontend
 cd frontend
 npm run dev
 ```
@@ -177,6 +221,7 @@ Open the frontend URL printed by Vite/npm (typically `http://localhost:5173`).
    - *"Clean it up."* — the agent proposes maintenance; a confirmation card appears with **Execute Compaction** / **Dismiss**.
 4. Click **Execute Compaction** — this is the only path that actually runs the destructive maintenance procedure. Post-maintenance health is reported using real numbers, not a generated summary.
 5. (Stretch) Go to the **OCC Simulation** tab, click **Trigger Data Collision**, then ask the copilot *"What is the OCC conflict that occurred?"* for a plain-language, log-grounded explanation.
+6. Ask *"What's happened since I last checked?"* — the agent summarizes all activity (batches, maintenance, health) since your previous check-in, and resets the checkpoint.
 
 ---
 
@@ -201,6 +246,7 @@ project2-self-healing-etl/
 ├── logs/
 │   ├── occ_error.log
 │   └── simulation_history.log
+│   
 ├── src/
 │   ├── app/
 │   │   ├── main.py              # MCP tool server entrypoint (port 8000)
@@ -213,6 +259,7 @@ project2-self-healing-etl/
 │   │   ├── metrics.py            # Live health scoring
 │   │   ├── history_logger.py     # Persistent JSONL trend history
 │   │   └── spark_session.py      # Shared SparkSession singleton
+│   │
 │   └── utils/
 │       └── catalog.py            # Realistic fake-data generation logic
 ├── tests/
@@ -278,3 +325,73 @@ This clears the Iceberg warehouse (tables, snapshots, health history logs), re-s
 - No automated test suite; `tests/` contains manual verification scripts, not pytest tests.
 
 ---
+
+## Stretch Goals Status
+
+- ✅ **OCC conflict simulation** — implemented, isolated to its own `db.occ_test` table, explained in chat via real logged timestamps.
+- ✅ **Proactive scheduled health checks** — implemented via APScheduler, alerts pushed over SSE without a user prompt.
+
+---
+
+## Key Forensic Findings
+
+> **TODO — replace this section with your own captured evidence, not descriptions.** Paste actual command output / screenshots for each item below.
+
+- **Data realism verification** — SQL query output showing the fix for power-buyer skew, bestseller skew, and catalog price consistency (before: top customer at 38% of all orders; after: capped tiered distribution). *[paste query + output/screenshot]*
+- **Before/after health metrics from a real maintenance run** — output of `get_table_health` immediately before clicking Execute Compaction, and immediately after. *[paste both outputs]*
+- **Manifest/snapshot inspection** — output of a query like `SELECT * FROM local.db.orders.manifests` and `SELECT * FROM local.db.orders.snapshots`, run yourself against a live table. *[paste output]*
+- **OCC conflict raw evidence** — the actual Java stack trace from `logs/occ_error.log` showing the `ValidationException` Iceberg raised. *[already captured — paste it in]*
+- **A real bug found and fixed during development** — e.g. the `RecursionError` traceback from a self-referential `calculate_health_score()` call, and the one-line diagnosis. *[paste traceback + fix]*
+
+---
+
+## Challenges Attempted (and what was learned)
+
+> **TODO — verify this list matches your actual experience before submitting; edit freely.**
+
+- **Data realism was harder than "add randomness."** Naive `random.randint`/`random.uniform` calls produced uniform distributions that looked nothing like real customer/product/price behavior. Fixing this required understanding *why* — e.g. an uncapped Zipf-style power-law formula mathematically guarantees the top-ranked id captures ~30-38% of all mass regardless of population size, which isn't a "more randomness" problem, it's a formula problem. Learned to verify generated data with real SQL distribution checks rather than trusting that "it looks skewed" is the same as "it's realistic."
+- **Two independently-computed health scores silently disagreed.** `metrics.py` (live chat tool) and `history_logger.py` (trend chart) each had their own scoring formula, computed differently, so the same table at the same moment could report two different health percentages. Learned that when the same real-world quantity is computed in two places, it needs one canonical implementation reused by both — otherwise, they *will* eventually drift apart silently.
+- **An LLM-judged proactive alert produced false positives.** The health-audit scheduler asked an LLM to decide "is this healthy?" from free text and gated the alert on whether the reply contained the literal word "HEALTHY" — which fires incorrectly whenever the LLM phrases a healthy result differently, or editorializes about numbers that are actually fine. Learned that any already-computed deterministic value (like a numeric health score) should gate control flow directly — the LLM should only be used to *phrase* an outcome, never to *decide* one, when a real number is already available.
+- **A recursion bug from a copy-paste error, not a logic bug.** A refactor meant to centralize health-score math into one function accidentally left the function calling itself with its own parameters — producing a `RecursionError` that initially looked like a Spark/py4j metadata-depth issue. Learned to read the actual traceback before assuming the "obvious" complex explanation; the real cause was a one-line mistake, not a deep systems issue.
+
+---
+
+## Self-Reflection
+
+> **TODO — these require your own investigation and honest answers. Do not submit AI-generated answers to these questions; the grading explicitly checks for real depth, not plausible-sounding text.** For each question below, the evidence you need to gather is listed — go run the described command/inspection yourself, then write the answer from what you actually observe.
+
+### 4.1 Data & Iceberg Understanding
+
+**What specifically did the Metadata File, Manifest List, and Manifest File each contain in your project — and how did you verify it yourself, rather than just citing the docs?**
+*Evidence to gather:* run `spark.sql("SELECT * FROM local.db.orders.snapshots").show(truncate=False)` and `spark.sql("SELECT * FROM local.db.orders.manifests").show(truncate=False)` against a live table; also locate the actual JSON metadata file on disk under `warehouse/db/orders/metadata/` and open it directly.
+*Your answer:* _(fill in after inspecting real output)_
+
+**Where exactly did partition pruning save work in your queries? What evidence did you actually look at to know that?**
+*Note:* your tables are not currently partitioned (no `PARTITIONED BY` clause in `pipeline.py`'s `writeTo(...)` calls) — if that's accurate, the honest answer may be "partition pruning wasn't applicable in this project's table design," which is a valid and honest self-reflection answer. Verify this by checking your actual `writeTo()` calls before answering either way.
+*Your answer:* _(fill in after checking)_
+
+**What would go wrong if you handled a schema change by renaming a column instead of evolving it? Why does Iceberg's Field ID approach avoid that pitfall?**
+*Evidence to gather:* if you have time, actually try `ALTER TABLE ... RENAME COLUMN` on a test table via Spark SQL and observe what Iceberg does with the underlying Field ID versus what a naive Parquet-only system would do.
+*Your answer:* _(fill in)_
+
+### 4.2 AI Agent & Engineering Understanding
+
+**Which parts of your MCP tool's output does the agent actually rely on to ground its answer — and what happens if that tool returns bad or stale data?**
+*Evidence to gather:* trace exactly which fields of `get_table_health`'s return string the LLM's response quotes back verbatim vs. paraphrases; consider what happens if `get_table_metrics()` throws (it currently returns an error string, not an exception — check how that string flows into the chat reply).
+*Your answer:* _(fill in)_
+
+**Where did you have to override, correct, or sanity-check something your AI coding assistant generated?**
+*This one you can answer directly and honestly from this project's actual history* — e.g. the LLM-keyword-matching alert bug, the two disagreeing health formulas, the recursion bug from a bad refactor, the false assumption about `psql` availability on Windows. Pick the ones that are true for you.
+*Your answer:* _(fill in)_
+
+**If a stakeholder asked "can I trust this number?", what in your system would you point to in order to answer them?**
+*Your answer:* _(fill in — likely candidates: the health score is computed live from Iceberg's own metadata tables via a single shared formula, not invented by the LLM; the maintenance result reports real post-action metrics, not a generated summary)_
+
+### 4.3 Business Understanding
+
+**Who would actually use this in your scenario, and what decision would they make differently because of it?**
+*Your answer:* _(fill in — e.g. a data platform engineer deciding when to schedule compaction, rather than discovering degradation only after a BI dashboard complaint)_
+
+**What's the biggest risk if this pipeline silently broke for a week — and would your system have caught that, or missed it?**
+*Consider honestly:* the proactive health-audit scheduler checks *fragmentation*, not *whether new data is arriving at all* — if the pipeline itself stopped running (not just degraded), would `run_health_audit()` actually detect that, or would a completely stale, unchanging-but-still-"healthy"-looking table go unnoticed? This is worth checking against your actual code before answering.
+*Your answer:* _(fill in)_

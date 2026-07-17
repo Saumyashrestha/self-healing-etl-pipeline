@@ -103,12 +103,15 @@ project2-self-healing-etl/
 │   ├── monitoring/
 │   │   ├── metrics.py           # Live on-demand health scoring (get_table_metrics)
 │   │   ├── history_logger.py    # Persistent JSONL trend history per table
-│   │   └── spark_session.py     # Shared SparkSession singleton
+│   │   ├── spark_session.py     # Shared SparkSession singleton
+│   │   └── catchup.py           # "Since last check-in" briefing; tracks last_checkin timestamp
 │   └── utils/
 │       └── catalog.py           # Fake-data realism: pricing, popularity tiers, status logic
 ├── tests/
 │   ├── test_iceberg_concurrency.py  # OCC simulation script (not pytest)
 │   └── verify_data.py               # Manual ad-hoc query script
+├── logs/
+│   └── last_checkin.json        # Single global timestamp; read/written by catchup.py
 ```
 
 ---
@@ -125,6 +128,7 @@ project2-self-healing-etl/
 - **MCP tools return plain strings**, not structured JSON, except where a tool explicitly needs structured data for the frontend (`get_pipeline_status`, `get_deep_telemetry`, `get_table_history` return `json.dumps(...)` strings). Follow this split when adding new tools.
 - **Business-logic modules are never imported directly by the FastAPI backend.** `main.py` (root) does not import `metrics.py`, `maintenance.py`, or `pipeline.py` — all access goes through `mcp_client.py`'s `call_mcp_tool()`. See Section 7 for why this matters.
 - **In-progress state uses plain module-level dicts as flags**, not a proper state store: `_pipeline_status` (`tools.py`), `maintenance_in_progress` (root `main.py`). These are process-local — see Section 9 for scaling implications.
+- **Cross-session state uses a single flat JSON file, not a database row.** `catchup.py`'s `last_checkin.json` is the first instance of state persisted *across restarts* rather than just in-memory — deliberately simple (single global timestamp, no per-user scoping) since there's no multi-user/session concept elsewhere in the app. Follow this same flat-file pattern for any future single-value persisted state; don't introduce a database table for something this simple without a stated reason.
 
 ---
 
@@ -159,7 +163,7 @@ FastAPI backend (:8001)
 
 MCP tool server (:8000)
  ├─ tools.py registers all tools on a FastMCP instance
- ├─ tools directly import and call: metrics.py, maintenance.py, pipeline.py, history_logger.py, spark_session.py
+ ├─ tools directly import and call: metrics.py, maintenance.py, pipeline.py, history_logger.py, spark_session.py, catchup.py
  └─ single shared SparkSession backs every tool call
 ```
 
@@ -177,20 +181,3 @@ MCP tool server (:8000)
 3. FastAPI backend → MCP tool server, via `mcp_client.py` only — never via direct Python import of business-logic modules. Consistently followed.
 4. MCP tool server → Spark/Iceberg/Postgres business logic — direct Python imports, allowed and expected; this is the one layer meant to touch them.
 5. No layer other than the MCP tool server's registered tools should call `execute_table_maintenance()` or `run_pipeline()` directly — both are only invoked from within `tools.py`.
-
----
-
-## 8. Known Dead / Unreachable Code Paths
-
-- **`/api/simulate-load` endpoint** (`src/app/main.py`) — defined, mounted, but not called by any current frontend component. `Dashboard.tsx` uses the MCP `run_incremental_load` tool instead. Confirm before removing — it may be a manual/debug entrypoint.
-- **`analyze_occ_crash_log` MCP-style tool definition and its associated system-prompt formatting instructions** (root `main.py`) — unreachable in normal use, because the `/chat` endpoint's regex interceptor (matching on `"occ"`, `"concurrency"`, `"conflict"`) answers OCC questions deterministically before the LLM tool-calling loop ever runs. Kept intentionally per project owner decision (lower priority than core acceptance criteria) — not a bug, but flagged so a future reader doesn't assume it's the live path.
-
----
-
-## 9. Needs Owner Input (undocumented architectural decisions)
-
-- Dual MCP client paths into the same tool server (chat via FastAPI bridge, dashboard via direct JS SDK) — no stated reason for the split; no stated coordination/consistency guarantee between them.
-- OCC simulation's subprocess-based invocation instead of an MCP tool — no stated reason.
-- `_pipeline_status` and `maintenance_in_progress` are process-local in-memory dicts, not persisted or shared across processes — acceptable for a single-instance demo deployment, but no comment states this is a known/accepted limitation versus an oversight.
-- Fixed health-score threshold (`HEALTH_THRESHOLD = 70` in `run_health_audit()`) — no stated rationale for this specific number versus any other; not derived from any documented SLA or requirement.
-- Two frontend log files (`occ_error.log`, `simulation_history.log`) are plain append/overwrite text files with no rotation or size bound — fine for a demo, unaddressed for anything longer-running.
