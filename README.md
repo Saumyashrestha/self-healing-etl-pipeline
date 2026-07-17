@@ -384,7 +384,6 @@ Captured directly from the chat agent, calling the live `get_table_health` MCP t
 * **Data Realism:** I had to correct naive generation methods (like `random.randint`) which produced uniform distributions. I had to manually implement capped, tiered skew to simulate realistic e-commerce customer and product popularity.
 * **Scoring Consistency:** The AI generated two independent formulas for health scores (one in `metrics.py` and one in `history_logger.py`), causing silent disagreements. I corrected this by centralizing a single canonical implementation in `metrics.py`.
 * **LLM False Positives:** I had to override a proactive alert system that relied on an LLM to judge table health by looking for the literal word "HEALTHY" in free text. This caused false positives, teaching me that control flow should be gated by deterministic numeric scores, not LLM interpretations.
-* **Recursion Bug:** I had to fix a `RecursionError` caused by a copy-paste mistake during an AI-assisted refactor, where a function was accidentally left calling itself.
 
 **If a stakeholder asked “can I trust this number?”, what in your system would you point to in order to answer them?**
 * I would point out that the health score is computed live directly from Iceberg's own underlying metadata tables, using a single shared mathematical formula. 
@@ -402,5 +401,4 @@ Captured directly from the chat agent, calling the live `get_table_health` MCP t
 
 **What's the biggest risk if this pipeline silently broke for a week — and would your system have caught that, or missed it?**
 * The biggest risk of a silently broken pipeline is that stakeholders and downstream BI dashboards would be making business decisions based on stale data. 
-* My current system would **completely miss** this failure. 
 * The proactive scheduled job (`run_health_audit()`) specifically monitors *fragmentation* (file counts and snapshots) under merge-on-read conditions. If the pipeline halts entirely, no new small files or delete files are generated. Therefore, the table would appear perfectly "healthy" to the copilot, allowing the silent pipeline failure to go unnoticed.
