@@ -73,7 +73,7 @@ const OCCVisualizer: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col w-full max-w-6xl bg-gray-900 rounded-xl shadow-2xl overflow-hidden border border-gray-700 font-mono">
+    <div className="flex flex-col w-full max-w-4xl lg:max-w-6xl xl:max-w-7xl 2xl:max-w-[1600px] mx-auto bg-gray-900 rounded-xl shadow-2xl overflow-hidden border border-gray-700 font-mono">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 sm:px-6 py-4 bg-gray-800 border-b border-gray-700">
         <div>
@@ -93,7 +93,7 @@ const OCCVisualizer: React.FC = () => {
       </div>
 
       {/* Split Pane Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 h-[800px] lg:h-[500px] bg-black">
+      <div className="grid grid-cols-1 lg:grid-cols-2 h-[800px] lg:h-[70vh] bg-black">
 
         {/* LEFT PANE: Action Terminal */}
         <div className="p-5 overflow-y-auto border-r border-gray-800 flex flex-col relative">

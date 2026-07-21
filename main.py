@@ -31,7 +31,7 @@ if not api_key:
 
 client = Groq(api_key=api_key)
 
-# --- 1. DEFINE TOOLS AS JSON SCHEMAS (UPDATED TO PLURAL 'table_names') ---
+# --- 1. DEFINE TOOLS AS JSON SCHEMAS ---
 agent_tools = [
     {
         "type": "function",
